@@ -1,0 +1,14 @@
+[package]
+name = "gguf-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap    = { version = "4", features = ["derive"] }
+anyhow  = "1"
+half    = "2"
+memmap2 = "0.9"
+rayon   = "1"
+
+[profile.release]
+opt-level = 3
