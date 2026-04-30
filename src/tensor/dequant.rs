@@ -231,6 +231,17 @@ fn dq8k(data: &[u8], n: usize) -> Vec<f32> {
 // ── QuantTensor ───────────────────────────────────────────────────────────────
 // Zero-copy: holds Arc<Mmap> + byte range instead of a Vec<u8> copy.
 // This keeps RAM usage equal to the compressed model size on disk.
+
+// Helper used by pack_q4k_for_gpu
+fn scale_min_k4(j: usize, q: &[u8]) -> (f32, f32) {
+    let (d, m) = if j < 4 {
+        (q[j] & 63, q[j+4] & 63)
+    } else {
+        ((q[j+4] & 0xF) | ((q[j-4] >> 6) << 4), (q[j+4] >> 4) | ((q[j] >> 6) << 4))
+    };
+    (d as f32, m as f32)
+}
+
 pub struct QuantTensor {
     mmap:   Arc<Mmap>,   // shared reference to the memory-mapped file
     offset: usize,        // byte start within mmap
@@ -317,6 +328,79 @@ impl QuantTensor {
             v.push(sc.to_bits());
             for i in 0..4 {
                 v.push(u32::from_le_bytes([blk[2+i*4], blk[3+i*4], blk[4+i*4], blk[5+i*4]]));
+            }
+        }
+        v
+    }
+
+    /// Pack Q4_K blocks for GPU (48 u32s/block).
+    /// Layout: [scale*df x8, min*dmin x8, nibbles x32]
+    pub fn pack_q4k_for_gpu(&self) -> Vec<u32> {
+        let nb   = self.rows * self.cols / 256;
+        let data = self.data();
+        let mut v = Vec::with_capacity(nb * 48);
+        for b in 0..nb {
+            let blk    = &data[b*144..(b+1)*144];
+            let df     = half::f16::from_le_bytes([blk[0], blk[1]]).to_f32();
+            let dmin   = half::f16::from_le_bytes([blk[2], blk[3]]).to_f32();
+            let scales = &blk[4..16];
+            let qs     = &blk[16..144];
+            for i in 0..4 {
+                let (s0, _) = scale_min_k4(i*2,     scales);
+                let (s1, _) = scale_min_k4(i*2 + 1, scales);
+                v.push((df * s0).to_bits());
+                v.push((df * s1).to_bits());
+            }
+            for i in 0..4 {
+                let (_, m0) = scale_min_k4(i*2,     scales);
+                let (_, m1) = scale_min_k4(i*2 + 1, scales);
+                v.push((dmin * m0).to_bits());
+                v.push((dmin * m1).to_bits());
+            }
+            for i in 0..32 {
+                v.push(u32::from_le_bytes([qs[i*4], qs[i*4+1], qs[i*4+2], qs[i*4+3]]));
+            }
+        }
+        v
+    }
+
+    /// Pack Q6_K blocks for GPU (64 u32s/block).
+    /// Layout: [scale*df x16 as f32, ql x32 u32s, qh x16 u32s]
+    pub fn pack_q6k_for_gpu(&self) -> Vec<u32> {
+        let nb   = self.rows * self.cols / 256;
+        let data = self.data();
+        let mut v = Vec::with_capacity(nb * 64);
+        for b in 0..nb {
+            let blk = &data[b*210..(b+1)*210];
+            let ql  = &blk[0..128];
+            let qh  = &blk[128..192];
+            let sc  = &blk[192..208];
+            let df  = half::f16::from_le_bytes([blk[208], blk[209]]).to_f32();
+            for i in 0..16 {
+                v.push((df * (sc[i] as i8) as f32).to_bits());
+            }
+            for i in 0..32 {
+                v.push(u32::from_le_bytes([ql[i*4], ql[i*4+1], ql[i*4+2], ql[i*4+3]]));
+            }
+            for i in 0..16 {
+                v.push(u32::from_le_bytes([qh[i*4], qh[i*4+1], qh[i*4+2], qh[i*4+3]]));
+            }
+        }
+        v
+    }
+
+    /// Pack Q8_0 blocks for GPU (9 u32s/block).
+    /// Layout: [d_f32_bits, i8_values x8 u32s]
+    pub fn pack_q8_0_for_gpu(&self) -> Vec<u32> {
+        let nb   = self.rows * self.cols / 32;
+        let data = self.data();
+        let mut v = Vec::with_capacity(nb * 9);
+        for b in 0..nb {
+            let d  = &data[b*34..(b+1)*34];
+            let df = half::f16::from_le_bytes([d[0], d[1]]).to_f32();
+            v.push(df.to_bits());
+            for i in 0..8 {
+                v.push(u32::from_le_bytes([d[2+i*4], d[3+i*4], d[4+i*4], d[5+i*4]]));
             }
         }
         v
