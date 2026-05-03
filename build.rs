@@ -1,0 +1,41 @@
+use std::path::PathBuf;
+
+fn compile(src: &str, out_name: &str, out_dir: &str) {
+    let src_text = std::fs::read_to_string(src)
+        .unwrap_or_else(|_| panic!("Cannot read {}", src));
+    let compiler = shaderc::Compiler::new()
+        .unwrap_or_else(|| panic!("Failed to create shaderc compiler"));
+    let mut options = shaderc::CompileOptions::new()
+        .unwrap_or_else(|| panic!("Failed to create compile options"));
+    options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_1 as u32);
+    options.set_source_language(shaderc::SourceLanguage::GLSL);
+    let result = compiler.compile_into_spirv(
+        &src_text,
+        shaderc::ShaderKind::Compute,
+        src,
+        "main",
+        Some(&options),
+    ).unwrap_or_else(|e| panic!("Compile {}: {}", src, e));
+    let out = PathBuf::from(out_dir).join(format!("{}.spv", out_name));
+    std::fs::write(&out, result.as_binary_u8()).unwrap();
+    println!("cargo:rerun-if-changed={}", src);
+}
+
+fn main() {
+    let out = std::env::var("OUT_DIR").unwrap();
+    println!("cargo:rerun-if-changed=build.rs");
+    for (src, name) in &[
+        ("src/gpu/q4_0_gemv.glsl",  "q4_0_gemv"),
+        ("src/gpu/q4k_gemv.glsl",   "q4k_gemv"),
+        ("src/gpu/q6k_gemv.glsl",   "q6k_gemv"),
+        ("src/gpu/q8_0_gemv.glsl",  "q8_0_gemv"),
+        ("src/gpu/f32_gemv.glsl",   "f32_gemv"),
+        ("src/gpu/rmsnorm.glsl",    "rmsnorm"),
+        ("src/gpu/rope.glsl",       "rope"),
+        ("src/gpu/kv_write.glsl",   "kv_write"),
+        ("src/gpu/attention.glsl",  "attention"),
+        ("src/gpu/swiglu.glsl",     "swiglu"),
+        ("src/gpu/add.glsl",        "add"),
+        ("src/gpu/add_rmsnorm.glsl","add_rmsnorm"),
+    ] { compile(src, name, &out); }
+}
