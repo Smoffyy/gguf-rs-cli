@@ -58,6 +58,11 @@ pub struct VkCtx {
     ts_period:   f32,
     ts_count:    u32,
     pub debug_gpu: bool,
+    // Keep-alive: prevents GPU from downclocking between token submissions
+    ka_cmd:      vk::CommandBuffer,
+    ka_fence:    vk::Fence,
+    ka_buf:      Option<(vk::Buffer, vk::DeviceMemory)>,
+    ka_active:   bool,
 }
 
 impl VkCtx {
@@ -146,18 +151,32 @@ impl VkCtx {
             let desc_pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(2000)
-                    .pool_sizes(&pool_sz)
-                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET),
+                    .pool_sizes(&pool_sz),
                 None)?;
 
             let cmd_pool = device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
                     .queue_family_index(queue_fam), None)?;
-            let cmd_buf  = device.allocate_command_buffers(
+            let cmd_bufs = device.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default().command_pool(cmd_pool)
-                    .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0];
-            let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+                    .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(2))?;
+            let cmd_buf = cmd_bufs[0];
+            let ka_cmd  = cmd_bufs[1];
+            let fence    = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+            let ka_fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+
+            // Keep-alive scratch buffer (16KB)
+            let ka_size = 16 * 1024u64;
+            let ka_buf_obj = device.create_buffer(
+                &vk::BufferCreateInfo::default().size(ka_size)
+                    .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+            let ka_reqs = device.get_buffer_memory_requirements(ka_buf_obj);
+            let ka_mem = device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(ka_reqs.size).memory_type_index(dev_idx), None)?;
+            device.bind_buffer_memory(ka_buf_obj, ka_mem, 0)?;
 
             // Persistent staging buffer (256KB, persistently mapped) for embedding uploads
             let staging_size = 256 * 1024u64;
@@ -189,6 +208,7 @@ impl VkCtx {
                 staging_buf, _staging_mem, staging_ptr, staging_size,
                 ts_pool, ts_period, ts_count: 0,
                 debug_gpu: false,
+                ka_cmd, ka_fence, ka_buf: Some((ka_buf_obj, ka_mem)), ka_active: false,
             })
         }
     }
@@ -280,6 +300,12 @@ impl VkCtx {
 
     pub fn begin(&mut self) {
         unsafe {
+            // Wait for keep-alive if it's in flight
+            if self.ka_active {
+                self.device.wait_for_fences(&[self.ka_fence], true, u64::MAX).unwrap();
+                self.device.reset_fences(&[self.ka_fence]).unwrap();
+                self.ka_active = false;
+            }
             self.device.reset_descriptor_pool(
                 self.desc_pool, vk::DescriptorPoolResetFlags::empty()).unwrap();
             self.device.reset_command_buffer(
@@ -344,6 +370,40 @@ impl VkCtx {
                 self.fence).unwrap();
             self.device.wait_for_fences(&[self.fence], true, u64::MAX).unwrap();
             self.device.reset_fences(&[self.fence]).unwrap();
+
+            // Fire keep-alive: small compute dispatches to prevent GPU clock drop
+            if let Some((ka_buf, _)) = self.ka_buf {
+                self.device.reset_command_buffer(
+                    self.ka_cmd, vk::CommandBufferResetFlags::empty()).unwrap();
+                self.device.begin_command_buffer(self.ka_cmd,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
+                let (pipe, layout) = self.pipes[&Shader::Add];
+                let ds = alloc_ds(&self.device, self.desc_pool, self.dsl3);
+                let i = |b| [vk::DescriptorBufferInfo::default()
+                    .buffer(b).offset(0).range(vk::WHOLE_SIZE)];
+                let (i0, i1, i2) = (i(ka_buf), i(ka_buf), i(ka_buf));
+                self.device.update_descriptor_sets(&[
+                    wr(ds, 0, &i0), wr(ds, 1, &i1), wr(ds, 2, &i2),
+                ], &[]);
+                let pc: [u32; 1] = [4096];
+                self.device.cmd_bind_pipeline(
+                    self.ka_cmd, vk::PipelineBindPoint::COMPUTE, pipe);
+                self.device.cmd_bind_descriptor_sets(
+                    self.ka_cmd, vk::PipelineBindPoint::COMPUTE, layout, 0, &[ds], &[]);
+                self.device.cmd_push_constants(self.ka_cmd, layout,
+                    vk::ShaderStageFlags::COMPUTE, 0,
+                    std::slice::from_raw_parts(pc.as_ptr() as *const u8, 4));
+                // Multiple dispatches to keep GPU busy longer
+                for _ in 0..64 {
+                    self.device.cmd_dispatch(self.ka_cmd, 64, 1, 1);
+                }
+                self.device.end_command_buffer(self.ka_cmd).unwrap();
+                self.device.queue_submit(self.queue,
+                    &[vk::SubmitInfo::default().command_buffers(&[self.ka_cmd])],
+                    self.ka_fence).unwrap();
+                self.ka_active = true;
+            }
         }
     }
 
@@ -411,6 +471,7 @@ impl VkCtx {
     }
 
     /// Fused residual add + rmsnorm: res += add_buf, then rmsnorm(res) -> out
+    #[allow(dead_code)]
     pub fn cmd_add_rmsnorm(&mut self, res: &ActBuf, add_buf: &ActBuf,
                            w: &ActBuf, out: &ActBuf, n: u32, eps: f32) {
         let pc: [u32; 2] = [n, eps.to_bits()];

@@ -55,7 +55,11 @@ fn main() -> Result<()> {
 
     let mut gpu: Option<VkCtx> = if args.gpu {
         match VkCtx::init() {
-            Ok(mut g) => { g.debug_gpu = args.debug_gpu; eprintln!("GPU ready."); Some(g) }
+            Ok(mut g) => {
+                g.debug_gpu = args.debug_gpu;
+                eprintln!("GPU ready.");
+                Some(g)
+            }
             Err(e) => { eprintln!("No GPU — using CPU. ({e})"); None }
         }
     } else { None };
@@ -149,13 +153,13 @@ fn main() -> Result<()> {
                     eprintln!("[user turn ids: {:?}]", &turn_ids[..turn_ids.len().min(15)]);
                 }
 
-                let lookahead = if args.smart_context {
-                    (ctx_len / 4).max(32).min(args.max_tokens)
+                let reserve = if args.smart_context {
+                    (ctx_len / 8).max(32).min(args.max_tokens)
                 } else {
                     32.min(args.max_tokens)
                 };
 
-                if pos + turn_ids.len() + lookahead >= ctx_len {
+                if pos + turn_ids.len() + reserve >= ctx_len {
                     if history.is_empty() {
                         eprintln!("[Context: too small, clearing conversation]");
                         let (p, _) = prefill_split(&model, &sys_ids, 0, &mut gpu, &mut cpu_cache);
@@ -205,26 +209,33 @@ fn rebuild_cache(
     gpu:       &mut Option<VkCtx>,
     cpu_cache: &mut KvCache,
 ) -> usize {
-    let drop_n = (history.len() / 2).max(1).min(history.len());
+    // Drop oldest 1/4 of history to make room
+    let drop_n = (history.len() / 4).max(1).min(history.len());
     history.drain(..drop_n);
-    eprintln!("[Context: dropped {} tokens, rebuilding with {} history tokens]",
-        drop_n, history.len());
 
+    let t0 = std::time::Instant::now();
+    eprintln!("[Context: dropped {} tokens, replaying system({}) + history({})...]",
+        drop_n, sys_ids.len(), history.len());
+
+    // Clear KV caches
     if gpu.is_none() {
         let c = &model.config;
         for l in 0..c.n_layers { cpu_cache.k[l].fill(0.0); cpu_cache.v[l].fill(0.0); }
     }
 
-    let (pos, _) = prefill_split(model, sys_ids, 0, gpu, cpu_cache);
-    let mut cur  = pos;
+    // Replay system prompt
+    let (mut pos, _) = prefill_split(model, sys_ids, 0, gpu, cpu_cache);
+    // Replay kept history
     for (i, &id) in history.iter().enumerate() {
         let _ = match gpu.as_mut() {
             Some(g) => model.forward_gpu(id as usize, pos + i, g),
             None    => model.forward_cpu(id as usize, pos + i, cpu_cache),
         };
-        cur = pos + i + 1;
     }
-    cur
+    pos += history.len();
+    eprintln!("[Context: rebuilt in {}ms, pos now {}]",
+        t0.elapsed().as_millis(), pos);
+    pos
 }
 
 fn prefill_split(
@@ -275,9 +286,10 @@ fn generate_collect(
             history.extend_from_slice(&generated);
             generated.clear();
             *pos = rebuild_cache(model, sys_ids, history, gpu, cpu_cache);
+            // After replay, run last token to get fresh logits
             if let Some(&last_id) = history.last().or(sys_ids.last()) {
                 *last = match gpu.as_mut() {
-                    Some(g) => model.forward_gpu(last_id as usize, pos.saturating_sub(1), g),
+                    Some(g) => model.forward_gpu(last_id as usize, *pos - 1, g),
                     None    => model.forward_cpu(last_id as usize, pos.saturating_sub(1), cpu_cache),
                 };
             }
