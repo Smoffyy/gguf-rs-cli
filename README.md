@@ -1,10 +1,10 @@
 # gguf-rs-cli
 
+Pure Rust local LLM inference engine with Vulkan GPU acceleration, built entirely from scratch!
+
 <p align="center">
   <img src="rust-logo.svg" alt="Rust Lgo" width="400"/>
 </p>
-
-Pure Rust local LLM inference engine with Vulkan GPU acceleration — built entirely from scratch.
 
 Run GGUF models locally in your terminal. No Python, no PyTorch, no CUDA required. Just Rust + Vulkan.
 
