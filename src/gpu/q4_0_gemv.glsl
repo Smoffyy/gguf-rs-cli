@@ -5,6 +5,8 @@ layout(set=0,binding=1) readonly buffer In  { float data[]; } vin;
 layout(set=0,binding=2) buffer Out { float data[]; } vout;
 layout(push_constant) uniform PC { uint rows; uint bpr; } pc;
 
+// Q4_0 block = 5 u32s per 32 weights: [f16_scale_bits, nibble_u32 x4]
+
 shared float sdata[256];
 
 void main() {
@@ -22,10 +24,10 @@ void main() {
         for (uint w = 0u; w < 4u; w++) {
             uint packed = mat.data[base+1u+w];
             for (uint i = 0u; i < 4u; i++) {
-                uint byte = (packed >> (i*8u)) & 0xFFu;
+                uint bv = (packed >> (i*8u)) & 0xFFu;
                 uint j = w*4u+i;
-                sum += float(int(byte & 0xFu)-8) * scale * vin.data[vb+j];
-                sum += float(int(byte >> 4u)-8)  * scale * vin.data[vb+j+16u];
+                sum += float(int(bv & 0xFu)-8) * scale * vin.data[vb+j];
+                sum += float(int(bv >> 4u)-8)  * scale * vin.data[vb+j+16u];
             }
         }
     }

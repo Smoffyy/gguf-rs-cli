@@ -10,7 +10,6 @@ shared float sdata[256];
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
-    // Phase 1: partial sum of squares
     float ss = 0.0;
     for (uint i = tid; i < pc.n; i += 256u)
         ss += x[i] * x[i];
@@ -21,8 +20,8 @@ void main() {
         barrier();
     }
 
-    // Phase 2: normalize — all threads read the reduced sum, each writes a stripe
-    float scale = 1.0 / sqrt(sdata[0] / float(pc.n) + uintBitsToFloat(floatBitsToUint(pc.eps)));
+    float scale = 1.0 / sqrt(sdata[0] / float(pc.n) + pc.eps);
+    barrier();
     for (uint i = tid; i < pc.n; i += 256u)
         o[i] = x[i] * scale * w[i];
 }

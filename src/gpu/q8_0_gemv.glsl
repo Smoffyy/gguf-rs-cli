@@ -5,6 +5,8 @@ layout(set=0,binding=1) readonly buffer In  { float data[]; } vin;
 layout(set=0,binding=2) buffer Out { float data[]; } vout;
 layout(push_constant) uniform PC { uint rows; uint bpr; } pc;
 
+// Q8_0 block = 9 u32s per 32 weights: [f32_scale, i8x4 x8]
+
 shared float sdata[256];
 
 void main() {
@@ -13,7 +15,6 @@ void main() {
     uint tid = gl_LocalInvocationID.x;
     float sum = 0.0;
 
-    // bpr = cols/32, each block = 9 u32s: [1 scale, 8 i8-packed]
     for (uint b = tid; b < pc.bpr; b += 256u) {
         uint base = (row * pc.bpr + b) * 9u;
         float sc = uintBitsToFloat(mat.data[base]);

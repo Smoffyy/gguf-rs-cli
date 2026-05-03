@@ -53,6 +53,10 @@ pub struct VkCtx {
     staging_mem: vk::DeviceMemory,
     staging_ptr: *mut u8,
     staging_size: u64,
+    ts_pool:     vk::QueryPool,
+    ts_period:   f32,
+    ts_count:    u32,
+    pub debug_gpu: bool,
 }
 
 impl VkCtx {
@@ -170,11 +174,19 @@ impl VkCtx {
             let staging_ptr = device.map_memory(
                 staging_mem, 0, staging_size, vk::MemoryMapFlags::empty())? as *mut u8;
 
+            let ts_period = props.limits.timestamp_period;
+            let ts_pool = device.create_query_pool(
+                &vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::TIMESTAMP)
+                    .query_count(128), None)?;
+
             Ok(Self {
                 _entry: entry, device, queue, pipes, dsl3, dsl4, dsl5,
                 desc_pool, cmd_pool, cmd_buf, fence, recording: false,
                 max_buf, dev_idx, host_idx,
                 staging_buf, staging_mem, staging_ptr, staging_size,
+                ts_pool, ts_period, ts_count: 0,
+                debug_gpu: false,
             })
         }
     }
@@ -268,7 +280,6 @@ impl VkCtx {
 
     pub fn begin(&mut self) {
         unsafe {
-            // FIX: reset the entire descriptor pool so sets are recycled each frame
             self.device.reset_descriptor_pool(
                 self.desc_pool, vk::DescriptorPoolResetFlags::empty()).unwrap();
             self.device.reset_command_buffer(
@@ -276,8 +287,42 @@ impl VkCtx {
             self.device.begin_command_buffer(self.cmd_buf,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
+            if self.debug_gpu {
+                self.device.cmd_reset_query_pool(self.cmd_buf, self.ts_pool, 0, 128);
+            }
+            self.ts_count = 0;
             self.recording = true;
         }
+    }
+
+    pub fn timestamp(&mut self) {
+        if !self.debug_gpu { return; }
+        if self.ts_count < 128 {
+            unsafe {
+                self.device.cmd_write_timestamp(
+                    self.cmd_buf, vk::PipelineStageFlags::COMPUTE_SHADER,
+                    self.ts_pool, self.ts_count);
+            }
+            self.ts_count += 1;
+        }
+    }
+
+    pub fn print_timestamps(&self) {
+        if !self.debug_gpu || self.ts_count < 2 { return; }
+        let mut data = vec![0u64; self.ts_count as usize];
+        unsafe {
+            self.device.get_query_pool_results(
+                self.ts_pool, 0,
+                &mut data, vk::QueryResultFlags::TYPE_64).ok();
+        }
+        let ns = self.ts_period;
+        for i in 1..self.ts_count as usize {
+            let dt = (data[i].wrapping_sub(data[i-1])) as f64 * ns as f64 / 1_000_000.0;
+            eprint!("[ts{}-{}: {:.2}ms] ", i-1, i, dt);
+        }
+        let total = (data[self.ts_count as usize - 1].wrapping_sub(data[0])) as f64
+            * ns as f64 / 1_000_000.0;
+        eprintln!("[total GPU: {:.2}ms]", total);
     }
 
     /// Record the logits->readback copy into the main command buffer, then submit+wait once.

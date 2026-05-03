@@ -24,14 +24,14 @@ void main() {
         uint b = h * pc.head_dim + i;
         float x0 = q[b];
         float x1 = q[b + hd2];
-        q[b]        = x0 * c - x1 * s;
+        q[b]       = x0 * c - x1 * s;
         q[b + hd2] = x0 * s + x1 * c;
     } else {
         uint kh = h - pc.n_heads;
         uint b = kh * pc.head_dim + i;
         float x0 = k[b];
         float x1 = k[b + hd2];
-        k[b]        = x0 * c - x1 * s;
+        k[b]       = x0 * c - x1 * s;
         k[b + hd2] = x0 * s + x1 * c;
     }
 }

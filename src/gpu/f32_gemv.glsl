@@ -14,9 +14,8 @@ void main() {
     float sum = 0.0;
 
     uint base = row * pc.cols;
-    for (uint i = tid; i < pc.cols; i += 256u) {
+    for (uint i = tid; i < pc.cols; i += 256u)
         sum += mat.data[base + i] * vin.data[i];
-    }
 
     sdata[tid] = sum;
     barrier();

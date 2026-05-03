@@ -42,6 +42,9 @@ struct Args {
     stats: bool,
     #[arg(long, default_value_t=false)]
     debug_tokens: bool,
+    /// Print per-token GPU timing breakdown
+    #[arg(long, default_value_t=false)]
+    debug_gpu: bool,
     #[arg(long, default_value_t=42)]
     seed: u64,
 }
@@ -52,7 +55,7 @@ fn main() -> Result<()> {
 
     let mut gpu: Option<VkCtx> = if args.gpu {
         match VkCtx::init() {
-            Ok(g)  => { eprintln!("GPU ready."); Some(g) }
+            Ok(mut g) => { g.debug_gpu = args.debug_gpu; eprintln!("GPU ready."); Some(g) }
             Err(e) => { eprintln!("No GPU — using CPU. ({e})"); None }
         }
     } else { None };
