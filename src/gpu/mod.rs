@@ -50,7 +50,7 @@ pub struct VkCtx {
     pub host_idx: u32,
     // Persistent staging buffer for per-token embedding uploads
     staging_buf: vk::Buffer,
-    staging_mem: vk::DeviceMemory,
+    _staging_mem: vk::DeviceMemory,
     staging_ptr: *mut u8,
     staging_size: u64,
     ts_pool:     vk::QueryPool,
@@ -159,7 +159,7 @@ impl VkCtx {
 
             // Persistent staging buffer (256KB, persistently mapped) for embedding uploads
             let staging_size = 256 * 1024u64;
-            let (staging_buf, staging_mem) = {
+            let (staging_buf, _staging_mem) = {
                 let buf = device.create_buffer(
                     &vk::BufferCreateInfo::default().size(staging_size)
                         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
@@ -172,7 +172,7 @@ impl VkCtx {
                 (buf, mem)
             };
             let staging_ptr = device.map_memory(
-                staging_mem, 0, staging_size, vk::MemoryMapFlags::empty())? as *mut u8;
+                _staging_mem, 0, staging_size, vk::MemoryMapFlags::empty())? as *mut u8;
 
             let ts_period = props.limits.timestamp_period;
             let ts_pool = device.create_query_pool(
@@ -184,7 +184,7 @@ impl VkCtx {
                 _entry: entry, device, queue, pipes, dsl3, dsl4, dsl5,
                 desc_pool, cmd_pool, cmd_buf, fence, recording: false,
                 max_buf, dev_idx, host_idx,
-                staging_buf, staging_mem, staging_ptr, staging_size,
+                staging_buf, _staging_mem, staging_ptr, staging_size,
                 ts_pool, ts_period, ts_count: 0,
                 debug_gpu: false,
             })
@@ -201,12 +201,10 @@ impl VkCtx {
         };
         let size = packed.len() as u64 * 4;
         if size > self.max_buf { return None; }
-        unsafe {
-            let (buf, mem) = self.upload_bytes(size,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                bytemuck::cast_slice(&packed)).ok()?;
-            Some(GpuTensor { buf, _mem: mem, rows: wt.rows as u32, bpr, shader })
-        }
+        let (buf, mem) = self.upload_bytes(size,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            bytemuck::cast_slice(&packed)).ok()?;
+        Some(GpuTensor { buf, _mem: mem, rows: wt.rows as u32, bpr, shader })
     }
 
     pub fn alloc_act(&mut self, size: u64) -> anyhow::Result<ActBuf> {
@@ -337,18 +335,6 @@ impl VkCtx {
                 vk::DependencyFlags::empty(), &[barrier], &[], &[]);
             self.device.cmd_copy_buffer(self.cmd_buf, logits_buf.buf, rb.buf,
                 &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: logits_buf.size }]);
-            self.device.end_command_buffer(self.cmd_buf).unwrap();
-            self.recording = false;
-            self.device.queue_submit(self.queue,
-                &[vk::SubmitInfo::default().command_buffers(&[self.cmd_buf])],
-                self.fence).unwrap();
-            self.device.wait_for_fences(&[self.fence], true, u64::MAX).unwrap();
-            self.device.reset_fences(&[self.fence]).unwrap();
-        }
-    }
-
-    pub fn submit(&mut self) {
-        unsafe {
             self.device.end_command_buffer(self.cmd_buf).unwrap();
             self.recording = false;
             self.device.queue_submit(self.queue,
