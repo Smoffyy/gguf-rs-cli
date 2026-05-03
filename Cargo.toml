@@ -1,7 +1,10 @@
 [package]
-name = "gguf-cli"
-version = "0.1.0"
+name = "gguf-rs-cli"
+version = "1.0.0"
 edition = "2021"
+description = "Pure Rust local LLM inference engine with Vulkan GPU acceleration — 100% offline, from scratch"
+license = "MIT"
+keywords = ["llm", "gguf", "inference", "vulkan", "ai"]
 
 [dependencies]
 clap     = { version = "4", features = ["derive"] }
@@ -15,8 +18,6 @@ bytemuck = { version = "1", features = ["derive"] }
 [build-dependencies]
 shaderc = "0.8"
 
-[package.metadata.shaderc]
-# Uses shaderc libraries from the Vulkan SDK (set VULKAN_SDK env var)
-
 [profile.release]
 opt-level = 3
+lto = "thin"

@@ -11,7 +11,7 @@ use tokenizer::chat::ChatTemplate;
 use gpu::VkCtx;
 
 #[derive(Parser)]
-#[command(name="gguf-cli", about="Pure Rust local LLM inference — 100% offline")]
+#[command(name="gguf-rs-cli", about="Pure Rust local LLM inference engine with Vulkan GPU acceleration")]
 struct Args {
     #[arg(short, long)]
     model: String,
