@@ -1,5 +1,5 @@
 #version 450
-layout(local_size_x=1) in;
+layout(local_size_x=128) in;
 layout(set=0,binding=0) readonly buffer Q  { float q[];  };
 layout(set=0,binding=1) readonly buffer KC { float kc[]; };
 layout(set=0,binding=2) readonly buffer VC { float vc[]; };
@@ -9,9 +9,12 @@ layout(push_constant) uniform PC {
     uint n_heads; uint n_kv_heads; uint head_dim; uint seq_len; uint n_ctx;
 } pc;
 
+shared float sdata[128];
+
 void main() {
     uint h = gl_WorkGroupID.x;
     if (h >= pc.n_heads) return;
+    uint tid = gl_LocalInvocationID.x;
     uint kv_ratio = pc.n_heads / pc.n_kv_heads;
     uint kv_h     = h / kv_ratio;
     uint kvd      = pc.n_kv_heads * pc.head_dim;
@@ -19,25 +22,56 @@ void main() {
     uint q_base   = h * pc.head_dim;
     uint sc_base  = h * pc.n_ctx;
 
-    float max_s = -1e30;
-    for (uint p = 0u; p < pc.seq_len; p++) {
+    // Phase 1: compute attention scores (each thread handles a subset of positions)
+    for (uint p = tid; p < pc.seq_len; p += 128u) {
         float s = 0.0;
         uint k_base = p * kvd + kv_h * pc.head_dim;
         for (uint d = 0u; d < pc.head_dim; d++)
             s += q[q_base + d] * kc[k_base + d];
         sc[sc_base + p] = s * scale;
-        if (sc[sc_base + p] > max_s) max_s = sc[sc_base + p];
     }
-    float sum = 0.0;
-    for (uint p = 0u; p < pc.seq_len; p++) {
-        sc[sc_base + p] = exp(sc[sc_base + p] - max_s);
-        sum += sc[sc_base + p];
-    }
-    for (uint p = 0u; p < pc.seq_len; p++)
-        sc[sc_base + p] /= sum;
+    barrier();
 
+    // Phase 2: find max (parallel reduction)
+    float local_max = -1e30;
+    for (uint p = tid; p < pc.seq_len; p += 128u) {
+        float v = sc[sc_base + p];
+        if (v > local_max) local_max = v;
+    }
+    sdata[tid] = local_max;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1u) {
+        if (tid < s && sdata[tid + s] > sdata[tid])
+            sdata[tid] = sdata[tid + s];
+        barrier();
+    }
+    float max_s = sdata[0];
+    barrier();
+
+    // Phase 3: exp and partial sum
+    float local_sum = 0.0;
+    for (uint p = tid; p < pc.seq_len; p += 128u) {
+        float e = exp(sc[sc_base + p] - max_s);
+        sc[sc_base + p] = e;
+        local_sum += e;
+    }
+    sdata[tid] = local_sum;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1u) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        barrier();
+    }
+    float total = sdata[0];
+    barrier();
+
+    // Phase 4: normalize scores
+    for (uint p = tid; p < pc.seq_len; p += 128u)
+        sc[sc_base + p] /= total;
+    barrier();
+
+    // Phase 5: weighted sum of values (each thread handles subset of dims)
     uint ao_base = h * pc.head_dim;
-    for (uint d = 0u; d < pc.head_dim; d++) {
+    for (uint d = tid; d < pc.head_dim; d += 128u) {
         float val = 0.0;
         for (uint p = 0u; p < pc.seq_len; p++)
             val += sc[sc_base + p] * vc[p * kvd + kv_h * pc.head_dim + d];

@@ -48,6 +48,11 @@ pub struct VkCtx {
     pub max_buf: u64,
     pub dev_idx: u32,
     pub host_idx: u32,
+    // Persistent staging buffer for per-token embedding uploads
+    staging_buf: vk::Buffer,
+    staging_mem: vk::DeviceMemory,
+    staging_ptr: *mut u8,
+    staging_size: u64,
 }
 
 impl VkCtx {
@@ -133,7 +138,10 @@ impl VkCtx {
             let pool_sz   = [vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 10000 }];
             let desc_pool = device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(2000).pool_sizes(&pool_sz),
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(2000)
+                    .pool_sizes(&pool_sz)
+                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET),
                 None)?;
 
             let cmd_pool = device.create_command_pool(
@@ -145,10 +153,28 @@ impl VkCtx {
                     .level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1))?[0];
             let fence = device.create_fence(&vk::FenceCreateInfo::default(), None)?;
 
+            // Persistent staging buffer (256KB, persistently mapped) for embedding uploads
+            let staging_size = 256 * 1024u64;
+            let (staging_buf, staging_mem) = {
+                let buf = device.create_buffer(
+                    &vk::BufferCreateInfo::default().size(staging_size)
+                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE), None)?;
+                let reqs = device.get_buffer_memory_requirements(buf);
+                let mem = device.allocate_memory(
+                    &vk::MemoryAllocateInfo::default()
+                        .allocation_size(reqs.size).memory_type_index(host_idx), None)?;
+                device.bind_buffer_memory(buf, mem, 0)?;
+                (buf, mem)
+            };
+            let staging_ptr = device.map_memory(
+                staging_mem, 0, staging_size, vk::MemoryMapFlags::empty())? as *mut u8;
+
             Ok(Self {
                 _entry: entry, device, queue, pipes, dsl3, dsl4, dsl5,
                 desc_pool, cmd_pool, cmd_buf, fence, recording: false,
                 max_buf, dev_idx, host_idx,
+                staging_buf, staging_mem, staging_ptr, staging_size,
             })
         }
     }
@@ -203,25 +229,36 @@ impl VkCtx {
         }
     }
 
-    /// Read logits back to CPU after GPU forward pass.
-    pub fn read_logits(&self, logits_buf: &ActBuf, rb: &ActBuf) -> Vec<f32> {
+    /// Fast embedding upload: memcpy to persistent staging, record copy in main cmd buf.
+    /// Must be called after begin() and before any dispatches that read `act`.
+    pub fn cmd_upload_act(&mut self, act: &ActBuf, data: &[f32]) {
         unsafe {
-            let cb = self.one_shot_begin();
-            let barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
-            self.device.cmd_pipeline_barrier(cb,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(), &[barrier], &[], &[]);
-            self.device.cmd_copy_buffer(cb, logits_buf.buf, rb.buf,
-                &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: logits_buf.size }]);
-            self.one_shot_end(cb);
-            let ptr = self.device.map_memory(rb.mem, 0, logits_buf.size,
-                vk::MemoryMapFlags::empty()).unwrap();
-            let mut out = vec![0f32; (logits_buf.size / 4) as usize];
+            let size = (data.len() * 4) as u64;
+            debug_assert!(size <= self.staging_size);
             std::ptr::copy_nonoverlapping(
-                ptr as *const u8, out.as_mut_ptr() as *mut u8, logits_buf.size as usize);
+                data.as_ptr() as *const u8, self.staging_ptr, size as usize);
+            self.device.cmd_copy_buffer(self.cmd_buf, self.staging_buf, act.buf,
+                &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size }]);
+            // Barrier: transfer write -> shader read
+            let b = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            self.device.cmd_pipeline_barrier(self.cmd_buf,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(), &[b], &[], &[]);
+        }
+    }
+
+    /// Read logits back to CPU — the copy was already recorded in the main cmd buf,
+    /// so we just map the host-visible readback buffer and memcpy.
+    pub fn read_logits(&self, _logits_buf: &ActBuf, rb: &ActBuf) -> Vec<f32> {
+        unsafe {
+            let ptr = self.device.map_memory(rb.mem, 0, rb.size,
+                vk::MemoryMapFlags::empty()).unwrap();
+            let mut out = vec![0f32; (rb.size / 4) as usize];
+            std::ptr::copy_nonoverlapping(
+                ptr as *const u8, out.as_mut_ptr() as *mut u8, rb.size as usize);
             self.device.unmap_memory(rb.mem);
             out
         }
@@ -231,12 +268,37 @@ impl VkCtx {
 
     pub fn begin(&mut self) {
         unsafe {
+            // FIX: reset the entire descriptor pool so sets are recycled each frame
+            self.device.reset_descriptor_pool(
+                self.desc_pool, vk::DescriptorPoolResetFlags::empty()).unwrap();
             self.device.reset_command_buffer(
                 self.cmd_buf, vk::CommandBufferResetFlags::empty()).unwrap();
             self.device.begin_command_buffer(self.cmd_buf,
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).unwrap();
             self.recording = true;
+        }
+    }
+
+    /// Record the logits->readback copy into the main command buffer, then submit+wait once.
+    pub fn submit_with_readback(&mut self, logits_buf: &ActBuf, rb: &ActBuf) {
+        unsafe {
+            let barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ);
+            self.device.cmd_pipeline_barrier(self.cmd_buf,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(), &[barrier], &[], &[]);
+            self.device.cmd_copy_buffer(self.cmd_buf, logits_buf.buf, rb.buf,
+                &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: logits_buf.size }]);
+            self.device.end_command_buffer(self.cmd_buf).unwrap();
+            self.recording = false;
+            self.device.queue_submit(self.queue,
+                &[vk::SubmitInfo::default().command_buffers(&[self.cmd_buf])],
+                self.fence).unwrap();
+            self.device.wait_for_fences(&[self.fence], true, u64::MAX).unwrap();
+            self.device.reset_fences(&[self.fence]).unwrap();
         }
     }
 
@@ -274,7 +336,8 @@ impl VkCtx {
     pub fn cmd_gemv(&mut self, wt: &GpuTensor, inp: &ActBuf, out: &ActBuf) {
         let pc: [u32; 2] = [wt.rows, wt.bpr];
         let ds = self.ds3(wt.buf, inp.buf, out.buf);
-        self.enc3(wt.shader, ds, &pc, wt.rows.div_ceil(64), 1, 1);
+        // 1 workgroup per row — 256 threads cooperate via shared memory reduction
+        self.enc3(wt.shader, ds, &pc, wt.rows, 1, 1);
     }
 
     pub fn cmd_add(&mut self, a: &ActBuf, b: &ActBuf, n: u32) {
@@ -287,7 +350,8 @@ impl VkCtx {
                     n_heads: u32, n_kv_heads: u32, head_dim: u32, pos: u32, freq: f32) {
         let pc: [u32; 5] = [n_heads, n_kv_heads, head_dim, pos, freq.to_bits()];
         let ds = self.ds3(q.buf, k.buf, q.buf);
-        self.enc3(Shader::Rope, ds, bytemuck::cast_slice(&pc), n_heads + n_kv_heads, 1, 1);
+        let total = (n_heads + n_kv_heads) * (head_dim / 2);
+        self.enc3(Shader::Rope, ds, bytemuck::cast_slice(&pc), total.div_ceil(64), 1, 1);
     }
 
     pub fn cmd_kv_write(&mut self, k: &ActBuf, v: &ActBuf, kc: &ActBuf, vc: &ActBuf,

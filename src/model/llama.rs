@@ -256,26 +256,33 @@ impl LlamaModel {
         let kvd = c.n_kv_heads * hd;
 
         let emb = w.token_embd.get_row(token);
-        gpu.write_act(&ga.x, &emb);
 
         gpu.begin();
+        // Upload embedding into main cmd buf (no separate GPU sync)
+        gpu.cmd_upload_act(&ga.x, &emb);
 
         for l in 0..c.n_layers {
+            // --- Attention block ---
             gpu.cmd_rmsnorm(&ga.x, &ga.attn_norms[l], &ga.xn,
                             c.n_embd as u32, c.rms_norm_eps);
             gpu.barrier();
 
+            // Q/K/V gemvs all read xn, write to independent buffers — no barrier needed between them
             if let Some(t) = gw.attn_q[l].as_ref() { gpu.cmd_gemv(t, &ga.xn, &ga.q); }
             if let Some(t) = gw.attn_k[l].as_ref() { gpu.cmd_gemv(t, &ga.xn, &ga.k); }
             if let Some(t) = gw.attn_v[l].as_ref() { gpu.cmd_gemv(t, &ga.xn, &ga.v); }
             gpu.barrier();
 
+            // Bias adds write to q/k/v independently — no barriers between them
             if let Some(ref b) = ga.q_bias[l] {
-                gpu.cmd_add(&ga.q, b, (c.n_heads * hd) as u32); gpu.barrier(); }
+                gpu.cmd_add(&ga.q, b, (c.n_heads * hd) as u32); }
             if let Some(ref b) = ga.k_bias[l] {
-                gpu.cmd_add(&ga.k, b, kvd as u32); gpu.barrier(); }
+                gpu.cmd_add(&ga.k, b, kvd as u32); }
             if let Some(ref b) = ga.v_bias[l] {
-                gpu.cmd_add(&ga.v, b, kvd as u32); gpu.barrier(); }
+                gpu.cmd_add(&ga.v, b, kvd as u32); }
+            // Only need barrier if any bias was applied
+            if ga.q_bias[l].is_some() || ga.k_bias[l].is_some() || ga.v_bias[l].is_some() {
+                gpu.barrier(); }
 
             gpu.cmd_rope(&ga.q, &ga.k,
                          c.n_heads as u32, c.n_kv_heads as u32,
@@ -293,15 +300,18 @@ impl LlamaModel {
             gpu.barrier();
 
             if let Some(t) = gw.attn_out[l].as_ref() {
-                gpu.cmd_gemv(t, &ga.attn_out, &ga.proj); gpu.barrier(); }
+                gpu.cmd_gemv(t, &ga.attn_out, &ga.proj); }
+            gpu.barrier();
 
             gpu.cmd_add(&ga.x, &ga.proj, c.n_embd as u32);
             gpu.barrier();
 
+            // --- FFN block ---
             gpu.cmd_rmsnorm(&ga.x, &ga.ffn_norms[l], &ga.xn,
                             c.n_embd as u32, c.rms_norm_eps);
             gpu.barrier();
 
+            // gate and up both read xn, write to independent buffers
             if let Some(t) = gw.ffn_gate[l].as_ref() { gpu.cmd_gemv(t, &ga.xn, &ga.gate); }
             if let Some(t) = gw.ffn_up[l].as_ref()   { gpu.cmd_gemv(t, &ga.xn, &ga.up); }
             gpu.barrier();
@@ -310,12 +320,14 @@ impl LlamaModel {
             gpu.barrier();
 
             if let Some(t) = gw.ffn_down[l].as_ref() {
-                gpu.cmd_gemv(t, &ga.gate, &ga.ff); gpu.barrier(); }
+                gpu.cmd_gemv(t, &ga.gate, &ga.ff); }
+            gpu.barrier();
 
             gpu.cmd_add(&ga.x, &ga.ff, c.n_embd as u32);
-            gpu.barrier();
+            if l < c.n_layers - 1 { gpu.barrier(); }
         }
 
+        gpu.barrier();
         gpu.cmd_rmsnorm(&ga.x, &ga.out_norm, &ga.xn,
                         c.n_embd as u32, c.rms_norm_eps);
         gpu.barrier();
@@ -323,7 +335,7 @@ impl LlamaModel {
             gpu.cmd_gemv(t, &ga.xn, &ga.logits);
         }
 
-        gpu.submit();
+        gpu.submit_with_readback(&ga.logits, &ga.logits_rb);
         gpu.read_logits(&ga.logits, &ga.logits_rb)
     }
 

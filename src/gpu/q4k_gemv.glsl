@@ -1,14 +1,20 @@
 #version 450
-layout(local_size_x=64) in;
+layout(local_size_x=256) in;
 layout(set=0,binding=0) readonly buffer Mat { uint data[]; } mat;
 layout(set=0,binding=1) readonly buffer In  { float data[]; } vin;
 layout(set=0,binding=2) buffer Out { float data[]; } vout;
 layout(push_constant) uniform PC { uint rows; uint bpr; } pc;
+
+shared float sdata[256];
+
 void main() {
-    uint row = gl_GlobalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
     if (row >= pc.rows) return;
+    uint tid = gl_LocalInvocationID.x;
     float sum = 0.0;
-    for (uint b = 0u; b < pc.bpr; b++) {
+
+    // Each thread handles a subset of blocks for this row
+    for (uint b = tid; b < pc.bpr; b += 256u) {
         uint base = (row * pc.bpr + b) * 48u;
         uint vb = b * 256u;
         for (uint iter = 0u; iter < 4u; iter++) {
@@ -29,5 +35,13 @@ void main() {
             }
         }
     }
-    vout.data[row] = sum;
+
+    sdata[tid] = sum;
+    barrier();
+    // Parallel reduction
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        barrier();
+    }
+    if (tid == 0u) vout.data[row] = sdata[0];
 }

@@ -13,7 +13,10 @@ ash      = "0.38"
 bytemuck = { version = "1", features = ["derive"] }
 
 [build-dependencies]
-naga = { version = "0.20", features = ["glsl-in", "spv-out"] }
+shaderc = "0.8"
+
+[package.metadata.shaderc]
+# Uses shaderc libraries from the Vulkan SDK (set VULKAN_SDK env var)
 
 [profile.release]
 opt-level = 3

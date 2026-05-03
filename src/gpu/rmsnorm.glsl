@@ -1,15 +1,28 @@
 #version 450
-layout(local_size_x=1) in;
+layout(local_size_x=256) in;
 layout(set=0,binding=0) readonly buffer X { float x[]; };
 layout(set=0,binding=1) readonly buffer W { float w[]; };
 layout(set=0,binding=2) buffer O { float o[]; };
 layout(push_constant) uniform PC { uint n; float eps; } pc;
 
+shared float sdata[256];
+
 void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Phase 1: partial sum of squares
     float ss = 0.0;
-    for (uint i = 0u; i < pc.n; i++)
+    for (uint i = tid; i < pc.n; i += 256u)
         ss += x[i] * x[i];
-    float scale = 1.0 / sqrt(ss / float(pc.n) + pc.eps);
-    for (uint i = 0u; i < pc.n; i++)
+    sdata[tid] = ss;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        barrier();
+    }
+
+    // Phase 2: normalize — all threads read the reduced sum, each writes a stripe
+    float scale = 1.0 / sqrt(sdata[0] / float(pc.n) + uintBitsToFloat(floatBitsToUint(pc.eps)));
+    for (uint i = tid; i < pc.n; i += 256u)
         o[i] = x[i] * scale * w[i];
 }

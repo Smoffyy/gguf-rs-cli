@@ -1,32 +1,23 @@
 use std::path::PathBuf;
-use naga::front::glsl;
-use naga::back::spv;
-use naga::valid::{Validator, ValidationFlags, Capabilities};
 
 fn compile(src: &str, out_name: &str, out_dir: &str) {
     let src_text = std::fs::read_to_string(src)
         .unwrap_or_else(|_| panic!("Cannot read {}", src));
-    let mut parser = glsl::Frontend::default();
-    let opts  = glsl::Options::from(naga::ShaderStage::Compute);
-    let module = parser.parse(&opts, &src_text)
-        .unwrap_or_else(|e| panic!("Parse {}: {:?}", src, e));
-    let mut v  = Validator::new(ValidationFlags::all(), Capabilities::all());
-    let info   = v.validate(&module)
-        .unwrap_or_else(|e| panic!("Validate {}: {:?}", src, e));
-    let spv_opts = spv::Options {
-        lang_version: (1, 0),
-        flags: spv::WriterFlags::empty(),
-        capabilities: None,
-        bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
-        zero_initialize_workgroup_memory: spv::ZeroInitializeWorkgroupMemoryMode::None,
-        debug_info: None,
-        binding_map: std::collections::BTreeMap::new(),
-    };
-    let words = spv::write_vec(&module, &info, &spv_opts, None)
-        .unwrap_or_else(|e| panic!("SPV {}: {:?}", src, e));
-    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let compiler = shaderc::Compiler::new()
+        .unwrap_or_else(|| panic!("Failed to create shaderc compiler"));
+    let mut options = shaderc::CompileOptions::new()
+        .unwrap_or_else(|| panic!("Failed to create compile options"));
+    options.set_target_env(shaderc::TargetEnv::Vulkan, shaderc::EnvVersion::Vulkan1_1 as u32);
+    options.set_source_language(shaderc::SourceLanguage::GLSL);
+    let result = compiler.compile_into_spirv(
+        &src_text,
+        shaderc::ShaderKind::Compute,
+        src,
+        "main",
+        Some(&options),
+    ).unwrap_or_else(|e| panic!("Compile {}: {}", src, e));
     let out = PathBuf::from(out_dir).join(format!("{}.spv", out_name));
-    std::fs::write(&out, &bytes).unwrap();
+    std::fs::write(&out, result.as_binary_u8()).unwrap();
     println!("cargo:rerun-if-changed={}", src);
 }
 
