@@ -262,9 +262,12 @@ impl LlamaModel {
         gpu.timestamp(); // ts0: after upload
 
         for l in 0..c.n_layers {
-            gpu.cmd_rmsnorm(&ga.x, &ga.attn_norms[l], &ga.xn,
-                            c.n_embd as u32, c.rms_norm_eps);
-            gpu.barrier();
+            // Layer 0: standalone rmsnorm. Layers 1+: xn already computed by fused add_rmsnorm from previous layer.
+            if l == 0 {
+                gpu.cmd_rmsnorm(&ga.x, &ga.attn_norms[l], &ga.xn,
+                                c.n_embd as u32, c.rms_norm_eps);
+                gpu.barrier();
+            }
             if l == 0 { gpu.timestamp(); } // ts1: after rmsnorm
 
             if let Some(t) = gw.attn_q[l].as_ref() { gpu.cmd_gemv(t, &ga.xn, &ga.q); }
@@ -302,11 +305,9 @@ impl LlamaModel {
                 gpu.cmd_gemv(t, &ga.attn_out, &ga.proj); }
             gpu.barrier();
 
-            gpu.cmd_add(&ga.x, &ga.proj, c.n_embd as u32);
-            gpu.barrier();
-
-            gpu.cmd_rmsnorm(&ga.x, &ga.ffn_norms[l], &ga.xn,
-                            c.n_embd as u32, c.rms_norm_eps);
+            // Fused: x += proj, then rmsnorm(x) -> xn
+            gpu.cmd_add_rmsnorm(&ga.x, &ga.proj, &ga.ffn_norms[l], &ga.xn,
+                                c.n_embd as u32, c.rms_norm_eps);
             gpu.barrier();
 
             if let Some(t) = gw.ffn_gate[l].as_ref() { gpu.cmd_gemv(t, &ga.xn, &ga.gate); }
@@ -322,14 +323,21 @@ impl LlamaModel {
             gpu.barrier();
             if l == 0 { gpu.timestamp(); } // ts5: after ffn_down
 
-            gpu.cmd_add(&ga.x, &ga.ff, c.n_embd as u32);
-            if l < c.n_layers - 1 { gpu.barrier(); }
+            if l < c.n_layers - 1 {
+                // Fused: x += ff, then rmsnorm(x, attn_norm[l+1]) -> xn for next layer
+                gpu.cmd_add_rmsnorm(&ga.x, &ga.ff, &ga.attn_norms[l+1], &ga.xn,
+                                    c.n_embd as u32, c.rms_norm_eps);
+                gpu.barrier();
+            } else {
+                // Last layer: fused x += ff, then rmsnorm(x, out_norm) -> xn
+                gpu.cmd_add_rmsnorm(&ga.x, &ga.ff, &ga.out_norm, &ga.xn,
+                                    c.n_embd as u32, c.rms_norm_eps);
+                gpu.barrier();
+            }
         }
 
         gpu.timestamp(); // ts6: after all layers
-        gpu.cmd_rmsnorm(&ga.x, &ga.out_norm, &ga.xn,
-                        c.n_embd as u32, c.rms_norm_eps);
-        gpu.barrier();
+        // Output projection (xn already has the final rmsnorm result)
         if let Some(t) = gw.output.as_ref() {
             gpu.cmd_gemv(t, &ga.xn, &ga.logits);
         }

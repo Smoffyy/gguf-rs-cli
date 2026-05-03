@@ -14,9 +14,10 @@ const SPV_KVWRITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/kv_write.sp
 const SPV_ATTN:    &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attention.spv"));
 const SPV_SWIGLU:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/swiglu.spv"));
 const SPV_ADD:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.spv"));
+const SPV_ADD_RN:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add_rmsnorm.spv"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Shader { Q4_0, Q4K, Q6K, Q8_0, F32, RmsNorm, Rope, KvWrite, Attn, SwiGlu, Add }
+pub enum Shader { Q4_0, Q4K, Q6K, Q8_0, F32, RmsNorm, Rope, KvWrite, Attn, SwiGlu, Add, AddRmsNorm }
 
 pub struct GpuTensor {
     pub buf:    vk::Buffer,
@@ -124,6 +125,7 @@ impl VkCtx {
                 (Shader::Attn,    SPV_ATTN,    dsl5),
                 (Shader::SwiGlu,  SPV_SWIGLU,  dsl3),
                 (Shader::Add,     SPV_ADD,     dsl3),
+                (Shader::AddRmsNorm, SPV_ADD_RN, dsl4),
             ] {
                 let layout = device.create_pipeline_layout(
                     &vk::PipelineLayoutCreateInfo::default()
@@ -406,6 +408,14 @@ impl VkCtx {
         let pc: [u32; 1] = [n];
         let ds = self.ds3(gate.buf, up.buf, gate.buf);
         self.enc3(Shader::SwiGlu, ds, bytemuck::cast_slice(&pc), n.div_ceil(64), 1, 1);
+    }
+
+    /// Fused residual add + rmsnorm: res += add_buf, then rmsnorm(res) -> out
+    pub fn cmd_add_rmsnorm(&mut self, res: &ActBuf, add_buf: &ActBuf,
+                           w: &ActBuf, out: &ActBuf, n: u32, eps: f32) {
+        let pc: [u32; 2] = [n, eps.to_bits()];
+        let ds = self.ds4(res.buf, add_buf.buf, w.buf, out.buf);
+        self.enc4(Shader::AddRmsNorm, ds, &pc, 1, 1, 1);
     }
 
     // ── Descriptor set helpers ────────────────────────────────────────────────

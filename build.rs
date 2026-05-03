@@ -36,5 +36,6 @@ fn main() {
         ("src/gpu/attention.glsl",  "attention"),
         ("src/gpu/swiglu.glsl",     "swiglu"),
         ("src/gpu/add.glsl",        "add"),
+        ("src/gpu/add_rmsnorm.glsl","add_rmsnorm"),
     ] { compile(src, name, &out); }
 }
