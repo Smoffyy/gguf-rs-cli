@@ -4,7 +4,10 @@ use crate::tensor::dequant::QuantTensor;
 use crate::gguf::types::GgmlType;
 
 const SPV_Q4_0:    &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q4_0_gemv.spv"));
+const SPV_Q4_1:    &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q4_1_gemv.spv"));
 const SPV_Q4K:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q4k_gemv.spv"));
+const SPV_Q3K:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q3k_gemv.spv"));
+const SPV_Q5K:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q5k_gemv.spv"));
 const SPV_Q6K:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q6k_gemv.spv"));
 const SPV_Q8_0:    &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/q8_0_gemv.spv"));
 const SPV_F32:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/f32_gemv.spv"));
@@ -17,7 +20,7 @@ const SPV_ADD:     &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.spv"));
 const SPV_ADD_RN:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add_rmsnorm.spv"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Shader { Q4_0, Q4K, Q6K, Q8_0, F32, RmsNorm, Rope, KvWrite, Attn, SwiGlu, Add, AddRmsNorm }
+pub enum Shader { Q4_0, Q4_1, Q4K, Q3K, Q5K, Q6K, Q8_0, F32, RmsNorm, Rope, KvWrite, Attn, SwiGlu, Add, AddRmsNorm }
 
 pub struct GpuTensor {
     pub buf:    vk::Buffer,
@@ -120,7 +123,10 @@ impl VkCtx {
             // (shader, spv, which DSL)
             for (shader, spv, dsl) in [
                 (Shader::Q4_0,    SPV_Q4_0,    dsl3),
+                (Shader::Q4_1,    SPV_Q4_1,    dsl3),
                 (Shader::Q4K,     SPV_Q4K,     dsl3),
+                (Shader::Q3K,     SPV_Q3K,     dsl3),
+                (Shader::Q5K,     SPV_Q5K,     dsl3),
                 (Shader::Q6K,     SPV_Q6K,     dsl3),
                 (Shader::Q8_0,    SPV_Q8_0,    dsl3),
                 (Shader::F32,     SPV_F32,     dsl3),
@@ -216,7 +222,10 @@ impl VkCtx {
     pub fn upload(&mut self, wt: &QuantTensor) -> Option<GpuTensor> {
         let (packed, shader, bpr) = match wt.typ {
             GgmlType::Q4_0                  => (wt.pack_q4_0_for_gpu(), Shader::Q4_0, (wt.cols/32) as u32),
+            GgmlType::Q4_1                  => (wt.pack_q4_1_for_gpu(), Shader::Q4_1, (wt.cols/32) as u32),
             GgmlType::Q4K if wt.cols%256==0 => (wt.pack_q4k_for_gpu(), Shader::Q4K,  (wt.cols/256) as u32),
+            GgmlType::Q3K if wt.cols%256==0 => (wt.pack_q3k_for_gpu(), Shader::Q3K,  (wt.cols/256) as u32),
+            GgmlType::Q5K if wt.cols%256==0 => (wt.pack_q5k_for_gpu(), Shader::Q5K,  (wt.cols/256) as u32),
             GgmlType::Q6K if wt.cols%256==0 => (wt.pack_q6k_for_gpu(), Shader::Q6K,  (wt.cols/256) as u32),
             GgmlType::Q8_0 if wt.cols%32==0 => (wt.pack_q8_0_for_gpu(),Shader::Q8_0, (wt.cols/32) as u32),
             _ => return None,
