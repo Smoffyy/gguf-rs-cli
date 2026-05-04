@@ -26,7 +26,10 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     for (src, name) in &[
         ("src/gpu/q4_0_gemv.glsl",  "q4_0_gemv"),
+        ("src/gpu/q4_1_gemv.glsl",  "q4_1_gemv"),
         ("src/gpu/q4k_gemv.glsl",   "q4k_gemv"),
+        ("src/gpu/q3k_gemv.glsl",   "q3k_gemv"),
+        ("src/gpu/q5k_gemv.glsl",   "q5k_gemv"),
         ("src/gpu/q6k_gemv.glsl",   "q6k_gemv"),
         ("src/gpu/q8_0_gemv.glsl",  "q8_0_gemv"),
         ("src/gpu/f32_gemv.glsl",   "f32_gemv"),

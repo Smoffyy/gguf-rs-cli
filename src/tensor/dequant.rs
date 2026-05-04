@@ -405,4 +405,77 @@ impl QuantTensor {
         }
         v
     }
+
+    /// Pack Q4_1 blocks for GPU (6 u32s/block of 32 weights).
+    /// Layout: [scale_f32, min_f32, nibbles x4 u32s]
+    pub fn pack_q4_1_for_gpu(&self) -> Vec<u32> {
+        let nb   = self.rows * self.cols / 32;
+        let data = self.data();
+        let mut v = Vec::with_capacity(nb * 6);
+        for b in 0..nb {
+            let d = &data[b*20..(b+1)*20];
+            let sc = half::f16::from_le_bytes([d[0], d[1]]).to_f32();
+            let mn = half::f16::from_le_bytes([d[2], d[3]]).to_f32();
+            v.push(sc.to_bits());
+            v.push(mn.to_bits());
+            for i in 0..4 {
+                v.push(u32::from_le_bytes([d[4+i*4], d[5+i*4], d[6+i*4], d[7+i*4]]));
+            }
+        }
+        v
+    }
+
+    /// Pack Q3_K superblocks for GPU (28 u32s per 256 weights).
+    /// Layout: [d_f32, 8xu32 hmask, 16xu32 qs, 3xu32 scales_packed]
+    pub fn pack_q3k_for_gpu(&self) -> Vec<u32> {
+        let nb   = self.rows * self.cols / 256;
+        let data = self.data();
+        let mut v = Vec::with_capacity(nb * 28);
+        for b in 0..nb {
+            let d = &data[b*110..(b+1)*110];
+            let df = half::f16::from_le_bytes([d[108], d[109]]).to_f32();
+            v.push(df.to_bits());
+            // hmask: 32 bytes = 8 u32s
+            for i in 0..8 {
+                v.push(u32::from_le_bytes([d[i*4], d[i*4+1], d[i*4+2], d[i*4+3]]));
+            }
+            // qs: 64 bytes = 16 u32s
+            for i in 0..16 {
+                v.push(u32::from_le_bytes([d[32+i*4], d[33+i*4], d[34+i*4], d[35+i*4]]));
+            }
+            // scales: 12 bytes = 3 u32s
+            for i in 0..3 {
+                v.push(u32::from_le_bytes([d[96+i*4], d[97+i*4], d[98+i*4], d[99+i*4]]));
+            }
+        }
+        v
+    }
+
+    /// Pack Q5_K superblocks for GPU (44 u32s per 256 weights).
+    /// Layout: [d_f32, dmin_f32, 3xu32 scales(12B), 8xu32 qh(32B), 32xu32 qs(128B)]
+    pub fn pack_q5k_for_gpu(&self) -> Vec<u32> {
+        let nb   = self.rows * self.cols / 256;
+        let data = self.data();
+        let mut v = Vec::with_capacity(nb * 44);
+        for b in 0..nb {
+            let d = &data[b*176..(b+1)*176];
+            let df   = half::f16::from_le_bytes([d[0], d[1]]).to_f32();
+            let dmin = half::f16::from_le_bytes([d[2], d[3]]).to_f32();
+            v.push(df.to_bits());
+            v.push(dmin.to_bits());
+            // scales: 12 bytes = 3 u32s
+            for i in 0..3 {
+                v.push(u32::from_le_bytes([d[4+i*4], d[5+i*4], d[6+i*4], d[7+i*4]]));
+            }
+            // qh: 32 bytes = 8 u32s
+            for i in 0..8 {
+                v.push(u32::from_le_bytes([d[16+i*4], d[17+i*4], d[18+i*4], d[19+i*4]]));
+            }
+            // qs: 128 bytes = 32 u32s
+            for i in 0..32 {
+                v.push(u32::from_le_bytes([d[48+i*4], d[49+i*4], d[50+i*4], d[51+i*4]]));
+            }
+        }
+        v
+    }
 }
