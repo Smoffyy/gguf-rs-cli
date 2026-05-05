@@ -1,19 +1,35 @@
 [package]
-name = "gguf-rs-cli"
-version = "1.0.0"
+name = "gguf-rs"
+version = "2.0.0"
 edition = "2021"
 description = "Pure Rust local LLM inference engine with Vulkan GPU acceleration — 100% offline, from scratch"
 license = "MIT"
-keywords = ["llm", "gguf", "inference", "vulkan", "ai"]
+
+[[bin]]
+name = "gguf-rs"
+path = "src/bin/cli.rs"
+
+[[bin]]
+name = "gguf-rs-server"
+path = "src/bin/server.rs"
 
 [dependencies]
-clap     = { version = "4", features = ["derive"] }
-anyhow   = "1"
-half     = "2"
-memmap2  = "0.9"
-rayon    = "1"
-ash      = "0.38"
-bytemuck = { version = "1", features = ["derive"] }
+clap        = { version = "4", features = ["derive"] }
+anyhow      = "1"
+half        = "2"
+memmap2     = "0.9"
+rayon       = "1"
+ash         = "0.38"
+bytemuck    = { version = "1", features = ["derive"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+serde_yaml  = "0.9"
+tokio       = { version = "1", features = ["full"] }
+axum        = "0.7"
+uuid        = { version = "1", features = ["v4"] }
+tower-http  = { version = "0.5", features = ["cors"] }
+async-stream = "0.3"
+futures     = "0.3"
 
 [build-dependencies]
 shaderc = "0.8"

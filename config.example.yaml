@@ -1,0 +1,45 @@
+# gguf-rs server configuration
+server:
+  host: "0.0.0.0"
+  port: 8080
+  # Optional API key (leave empty for no auth)
+  api_key: ""
+
+# Default sampling parameters (can be overridden per-request)
+defaults:
+  temperature: 0.7
+  top_k: 40
+  top_p: 0.9
+  max_tokens: 512
+  repetition_penalty: 1.1
+  seed: 42
+  ctx_len: 8192
+  smart_context: true
+
+# Model definitions — the first model is loaded on startup
+models:
+  - id: "qwen2.5-7b"
+    name: "Qwen 2.5 7B Instruct"
+    path: "D:/LLMS/Qwen/Qwen2.5/qwen2.5-7b-instruct-q4_k_m.gguf"
+    gpu: true
+    # Per-model sampling overrides (optional)
+    temperature: 0.7
+    ctx_len: 32000
+    max_tokens: 1024
+    system_prompt: "You are a helpful assistant."
+    # Custom stop sequences (optional, added to model's built-in stops)
+    stop: []
+
+  #- id: "llama3-8b"
+  #  name: "Llama 3.1 8B Instruct"
+  #  path: "D:/LLMS/Meta/llama-3.1-8b-instruct-q4_k_m.gguf"
+  #  gpu: true
+  #  temperature: 0.6
+  #  ctx_len: 8192
+#
+  #- id: "mistral-7b"
+  #  name: "Mistral 7B Instruct v0.2"
+  #  path: "D:/LLMS/Mistral/mistral-7b-instruct-v0.2-q4_k_m.gguf"
+  #  gpu: true
+  #  temperature: 0.7
+  #  ctx_len: 32000

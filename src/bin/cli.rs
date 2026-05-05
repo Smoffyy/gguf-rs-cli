@@ -1,14 +1,12 @@
-mod gguf; mod tensor; mod model; mod math; mod tokenizer; mod sampler; mod gpu;
-
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::time::Instant;
 use anyhow::Result;
 use clap::Parser;
-use model::llama::{KvCache, LlamaModel};
-use tokenizer::bpe::Tokenizer;
-use tokenizer::chat::ChatTemplate;
-use gpu::VkCtx;
+use gguf_rs::model::llama::{KvCache, LlamaModel};
+use gguf_rs::tokenizer::bpe::Tokenizer;
+use gguf_rs::tokenizer::chat::ChatTemplate;
+use gguf_rs::gpu::VkCtx;
 
 #[derive(Parser)]
 #[command(name="gguf-rs-cli", about="Pure Rust local LLM inference engine with Vulkan GPU acceleration")]
@@ -31,18 +29,14 @@ struct Args {
     rep_penalty: f32,
     #[arg(short='c', long, default_value_t=8192)]
     ctx_len: usize,
-    /// Enable GPU acceleration (Vulkan)
     #[arg(long, default_value_t=false)]
     gpu: bool,
-    /// Smart context: slide window mid-generation so responses always complete
     #[arg(long, default_value_t=false)]
     smart_context: bool,
-    /// Print token throughput statistics after each response
     #[arg(long, default_value_t=false)]
     stats: bool,
     #[arg(long, default_value_t=false)]
     debug_tokens: bool,
-    /// Print per-token GPU timing breakdown
     #[arg(long, default_value_t=false)]
     debug_gpu: bool,
     #[arg(long, default_value_t=42)]
@@ -51,7 +45,7 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    sampler::set_seed(args.seed);
+    gguf_rs::sampler::set_seed(args.seed);
 
     let mut gpu: Option<VkCtx> = if args.gpu {
         match VkCtx::init() {
@@ -209,7 +203,6 @@ fn rebuild_cache(
     gpu:       &mut Option<VkCtx>,
     cpu_cache: &mut KvCache,
 ) -> usize {
-    // Drop oldest 1/4 of history to make room
     let drop_n = (history.len() / 4).max(1).min(history.len());
     history.drain(..drop_n);
 
@@ -217,15 +210,12 @@ fn rebuild_cache(
     eprintln!("[Context: dropped {} tokens, replaying system({}) + history({})...]",
         drop_n, sys_ids.len(), history.len());
 
-    // Clear KV caches
     if gpu.is_none() {
         let c = &model.config;
         for l in 0..c.n_layers { cpu_cache.k[l].fill(0.0); cpu_cache.v[l].fill(0.0); }
     }
 
-    // Replay system prompt
     let (mut pos, _) = prefill_split(model, sys_ids, 0, gpu, cpu_cache);
-    // Replay kept history
     for (i, &id) in history.iter().enumerate() {
         let _ = match gpu.as_mut() {
             Some(g) => model.forward_gpu(id as usize, pos + i, g),
@@ -277,7 +267,7 @@ fn generate_collect(
     let mut generated: Vec<u32> = Vec::new();
 
     loop {
-        let next = sampler::sample(last, temperature, top_k, top_p, rep_penalty, recent);
+        let next = gguf_rs::sampler::sample(last, temperature, top_k, top_p, rep_penalty, recent);
         if stops.contains(&(next as u32)) { break; }
         if generated.len() >= max         { break; }
 
@@ -286,7 +276,6 @@ fn generate_collect(
             history.extend_from_slice(&generated);
             generated.clear();
             *pos = rebuild_cache(model, sys_ids, history, gpu, cpu_cache);
-            // After replay, run last token to get fresh logits
             if let Some(&last_id) = history.last().or(sys_ids.last()) {
                 *last = match gpu.as_mut() {
                     Some(g) => model.forward_gpu(last_id as usize, *pos - 1, g),
