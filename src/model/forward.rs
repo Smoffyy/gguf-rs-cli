@@ -54,7 +54,7 @@ impl LlamaModel {
 }
 
 impl LlamaModel {
-    fn record_attn_gpu(&self, l: usize, pos: usize, gpu: &mut VkCtx) {
+    fn record_attn_gpu(&self, l: usize, pos: usize, kv_slot: usize, gpu: &mut VkCtx) {
         let c   = &self.config;
         let gw  = self.gpu_w.as_ref().unwrap();
         let ga  = self.gpu_acts.as_ref().unwrap();
@@ -84,11 +84,11 @@ impl LlamaModel {
                      hd as u32, pos as u32, c.rope_freq_base);
         gpu.barrier();
 
-        gpu.cmd_kv_write(&ga.k, &ga.v, &ga.k_cache[l], &ga.v_cache[l],
+        gpu.cmd_kv_write(&ga.k, &ga.v, &ga.k_cache[kv_slot][l], &ga.v_cache[kv_slot][l],
                          pos as u32, c.n_kv_heads as u32, hd as u32);
         gpu.barrier();
 
-        gpu.cmd_attention(&ga.q, &ga.k_cache[l], &ga.v_cache[l],
+        gpu.cmd_attention(&ga.q, &ga.k_cache[kv_slot][l], &ga.v_cache[kv_slot][l],
                           &ga.attn_out, &ga.scores,
                           c.n_heads as u32, c.n_kv_heads as u32,
                           hd as u32, (pos + 1) as u32, ga.ctx_len as u32,
@@ -134,8 +134,8 @@ impl LlamaModel {
         gpu.barrier();
     }
 
-    fn record_layer_gpu(&self, l: usize, pos: usize, gpu: &mut VkCtx) {
-        self.record_attn_gpu(l, pos, gpu);
+    fn record_layer_gpu(&self, l: usize, pos: usize, kv_slot: usize, gpu: &mut VkCtx) {
+        self.record_attn_gpu(l, pos, kv_slot, gpu);
         if self.weights.ffn_router[l].is_some() {
             let ga = self.gpu_acts.as_ref().unwrap();
             let c  = &self.config;
@@ -156,6 +156,10 @@ impl LlamaModel {
     }
 
     pub fn forward_gpu_prefill(&self, tokens: &[usize], start_pos: usize, gpu: &mut VkCtx, chunk: usize) -> Vec<f32> {
+        self.forward_gpu_prefill_slot(tokens, start_pos, 0, gpu, chunk)
+    }
+
+    pub fn forward_gpu_prefill_slot(&self, tokens: &[usize], start_pos: usize, kv_slot: usize, gpu: &mut VkCtx, chunk: usize) -> Vec<f32> {
         if tokens.is_empty() { return vec![0f32; self.config.n_vocab]; }
 
         let c = &self.config;
@@ -180,7 +184,7 @@ impl LlamaModel {
                 let ga = self.gpu_acts.as_ref().unwrap();
                 gpu.cmd_copy_to_act(&ga.x, emb_buf, (i * c.n_embd * 4) as u64);
                 for l in 0..c.n_layers {
-                    self.record_layer_gpu(l, start_pos + i, gpu);
+                    self.record_layer_gpu(l, start_pos + i, kv_slot, gpu);
                 }
             }
 
@@ -205,6 +209,10 @@ impl LlamaModel {
     }
 
     pub fn forward_gpu(&self, token: usize, pos: usize, gpu: &mut VkCtx) -> Vec<f32> {
+        self.forward_gpu_slot(token, pos, 0, gpu)
+    }
+
+    pub fn forward_gpu_slot(&self, token: usize, pos: usize, kv_slot: usize, gpu: &mut VkCtx) -> Vec<f32> {
         let c  = &self.config;
         let w  = &self.weights;
         let gw = self.gpu_w.as_ref().unwrap();
@@ -218,7 +226,7 @@ impl LlamaModel {
         gpu.timestamp();
 
         for l in 0..c.n_layers {
-            self.record_layer_gpu(l, pos, gpu);
+            self.record_layer_gpu(l, pos, kv_slot, gpu);
         }
         gpu.timestamp();
 

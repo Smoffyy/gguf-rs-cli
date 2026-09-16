@@ -48,6 +48,53 @@ impl ChatTemplate {
         }
     }
 
+    pub fn render_conversation(&self, messages: &[(String, String)]) -> String {
+        let supports_system_role = matches!(self, Self::ChatML | Self::Llama3 | Self::Phi3);
+        let mut out = String::new();
+        let mut pending_system = String::new();
+        for (role, content) in messages {
+            let role = if role == "developer" { "system" } else { role.as_str() };
+            if role == "system" && !supports_system_role {
+                if !pending_system.is_empty() { pending_system.push('\n'); }
+                pending_system.push_str(content);
+                continue;
+            }
+            let merged;
+            let content: &str = if !pending_system.is_empty() && role != "system" {
+                merged = format!("[System]: {pending_system}\n\n{content}");
+                pending_system.clear();
+                &merged
+            } else { content };
+            match self {
+                Self::ChatML => out.push_str(&format!("<|im_start|>{role}\n{content}<|im_end|>\n")),
+                Self::Llama3 => out.push_str(&format!(
+                    "<|start_header_id|>{role}<|end_header_id|>\n\n{content}<|eot_id|>")),
+                Self::Phi3   => out.push_str(&format!("<|{role}|>\n{content}<|end|>\n")),
+                Self::Gemma  => {
+                    let r = if role == "assistant" { "model" } else { "user" };
+                    out.push_str(&format!("<start_of_turn>{r}\n{content}<end_of_turn>\n"));
+                }
+                Self::Llama2 => {
+                    if role == "user" { out.push_str(&format!("[INST] {content} [/INST]")); }
+                    else { out.push_str(&format!(" {content} ")); }
+                }
+                Self::Simple => {
+                    let label = if role == "user" { "User" } else if role == "assistant" { "Assistant" } else { "System" };
+                    out.push_str(&format!("{label}: {content}\n"));
+                }
+            }
+        }
+        out.push_str(match self {
+            Self::ChatML => "<|im_start|>assistant\n",
+            Self::Llama3 => "<|start_header_id|>assistant<|end_header_id|>\n\n",
+            Self::Gemma  => "<start_of_turn>model\n",
+            Self::Phi3   => "<|assistant|>\n",
+            Self::Llama2 => "",
+            Self::Simple => "Assistant:",
+        });
+        out
+    }
+
     pub fn stop_tokens(&self, tok: &Tokenizer) -> Vec<u32> {
         let mut stops = tok.eos_ids.clone();
         let extras: &[&str] = match self {

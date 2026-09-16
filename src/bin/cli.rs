@@ -133,7 +133,7 @@ fn main() -> Result<()> {
 
     let sys_text = if args.raw { String::new() } else { tmpl.system_prompt(&system) };
     let sys_ids: Vec<u32> = if sys_text.is_empty() { vec![] }
-    else { tok.encode(&sys_text, tmpl.uses_bos() && tok.add_bos_token) };
+    else { tok.encode(&sys_text, tmpl.uses_bos() || tok.add_bos_token) };
 
     match args.prompt {
         Some(ref p) => {

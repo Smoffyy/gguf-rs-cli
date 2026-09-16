@@ -7,3 +7,4 @@ pub mod sampler;
 pub mod gpu;
 pub mod power;
 pub mod chat;
+pub mod server;

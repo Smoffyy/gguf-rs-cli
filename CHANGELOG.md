@@ -4,6 +4,34 @@ All notable changes will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-09-15
+### Added
+`gguf-rs-server`: an OpenAI-compatible local HTTP server (`GET /v1/models`, `POST
+/v1/chat/completions`, streaming and non-streaming), configured via a `models.ini`
+registry in the same shape as llama.cpp's `--models-preset` router file. Just-in-time
+model loading, only one model resident at a time (switching drains in-flight requests
+on the old model, unloads it, loads the new one), and real concurrent request handling:
+each loaded model gets `parallel` independent slots — round-robin scheduled on a
+dedicated worker thread, each with its own KV-cache region — instead of a single
+request queue.
+
+Required giving each parallel slot genuine memory isolation rather than a shared-buffer
+position offset: `GpuActs.k_cache`/`v_cache` became `Vec<Vec<ActBuf>>` (slot × layer),
+`LlamaModel::load_with_slots()` allocates one independent KV-cache set per slot sized
+`ctx-size / parallel`, and `forward_gpu`/`forward_gpu_prefill` gained slot-aware
+variants. An earlier position-offset design was caught in testing: two concurrent
+requests produced correct output individually but garbled output when run in parallel,
+because the attention read range wasn't scoped to each slot's own window.
+
+Also fixed in the process: BOS-token gating used `template_needs_bos && add_bos_token`
+(AND) instead of `template_needs_bos || add_bos_token` (OR), which suppressed BOS for
+Gemma even though its GGUF metadata declares `add_bos_token=true` — silently producing
+empty completions for any Gemma chat turn that included a system prompt. Affected the
+CLI too, not just the new server.
+
+Added `render_conversation()` to `ChatTemplate` for rendering a full OpenAI-style
+message history (not just a single system+user turn) per template.
+
 ## [2.0.0] - 2026-09-15
 ### Fixed
 Garbled output on every model regardless of quantization. The Q2_K/Q3_K/Q4_K/Q5_K/Q6_K

@@ -9,8 +9,8 @@ Intel) with a full CPU fallback.
   <img src="rust-logo.svg" alt="Rust logo" width="400"/>
 </p>
 
-CLI-only right now. An OpenAI-compatible local server existed as a WIP and was removed
-to keep this focused — it'll come back once the CLI/engine is solid.
+Ships as two binaries: `gguf-rs` (the CLI) and `gguf-rs-server` (an OpenAI-compatible
+local HTTP server with just-in-time model loading — see [Server](#server) below).
 
 ## What it does
 
@@ -122,6 +122,55 @@ Usage: gguf-rs [OPTIONS] --model <MODEL>
   -h, --help                   Print help
 ```
 
+## Server
+
+`gguf-rs-server` speaks the OpenAI Chat Completions API (`GET /v1/models`, `POST
+/v1/chat/completions`, streaming and non-streaming) against a `models.ini` registry —
+the same shape as llama.cpp's `--models-preset` router file, with keys matching the CLI
+flag names above.
+
+```bash
+gguf-rs-server --models-preset models.ini --port 8080
+```
+
+`models.ini`:
+```ini
+[*]
+ctx-size = 8192
+temp = 0.7
+ngl = -1
+parallel = 4
+
+[qwen]
+model = ./models/qwen2.5-7b-instruct-q4_k_m.gguf
+temp = 0.4
+
+[gemma]
+model = ./models/gemma-2-2b-it-q4_k_m.gguf
+load-on-startup = true
+```
+
+`[*]` holds defaults every model inherits unless it overrides the same key; every other
+`[section]` name becomes the model ID clients pass as `"model"` in a request. A full
+template with every supported key is in `models.ini.example`.
+
+How it behaves:
+- **`GET /v1/models` lists every configured model**, loaded or not — matching real
+  OpenAI-API semantics, where the models list isn't tied to what's resident in memory.
+- **Just-in-time loading**: the first request for a model ID loads it; only one model is
+  ever resident at a time, so requesting a different model waits for the current one's
+  in-flight requests to finish, unloads it, and loads the new one.
+- **Real concurrency, not a single-file queue**: each loaded model gets `parallel`
+  concurrent request slots (default 4, set per-model or globally), each with its own KV
+  cache region, round-robin scheduled on a dedicated worker thread — multiple streaming
+  responses genuinely progress together rather than one finishing before the next
+  starts. `ctx-size` is the *total* budget, split evenly across slots (`ctx-size / parallel`
+  each), so raise `ctx-size` or lower `parallel` if you need longer individual
+  conversations. Requests beyond the slot count queue and get admitted as slots free up.
+- `ngl`/`n-gpu-layers` maps to on/off (this engine doesn't do partial layer offload — any
+  nonzero value means "use the GPU"). `mmproj` is accepted for config-file compatibility
+  but ignored with a warning; vision isn't supported yet.
+
 ## Performance
 
 Measured on an NVIDIA RTX 3080:
@@ -146,10 +195,17 @@ through CPU each layer.
 ```
 src/
 ├── bin/
-│   └── cli.rs               # Argument parsing, entrypoint
-├── chat.rs                   # Chat loop: prefill, generation, context-window rebuild
+│   ├── cli.rs               # Argument parsing, entrypoint (gguf-rs)
+│   └── server.rs            # Argument parsing, entrypoint (gguf-rs-server)
+├── chat.rs                   # CLI chat loop: prefill, generation, context-window rebuild
 ├── power.rs                  # Automatic NVIDIA clock lock
 ├── sampler.rs                 # Temperature/top-k/top-p/min-p/penalties/Mirostat
+├── server/
+│   ├── ini.rs                 # models.ini parser
+│   ├── registry.rs             # models.ini → per-model ModelPreset
+│   ├── openai.rs                # OpenAI-compatible request/response types
+│   ├── worker.rs                 # Dedicated inference thread: JIT load/unload, round-robin parallel slots
+│   └── app.rs                     # axum routes: /v1/models, /v1/chat/completions (streaming + non-streaming)
 ├── gguf/
 │   ├── reader.rs             # GGUF file parser
 │   └── types.rs              # GGUF value types, GgmlType enum

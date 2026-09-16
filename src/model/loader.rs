@@ -9,6 +9,11 @@ use super::*;
 impl LlamaModel {
     pub fn load(path: &Path, ctx_len: usize,
                 gpu: Option<&mut VkCtx>) -> Result<(Self, GgufFile)> {
+        Self::load_with_slots(path, ctx_len, 1, gpu)
+    }
+
+    pub fn load_with_slots(path: &Path, ctx_len: usize, n_slots: usize,
+                gpu: Option<&mut VkCtx>) -> Result<(Self, GgufFile)> {
         eprintln!("Parsing GGUF...");
         let f    = std::fs::File::open(path)?;
         let gguf = reader::parse(std::io::BufReader::new(f))?;
@@ -227,19 +232,28 @@ impl LlamaModel {
                 ffn_gate, ffn_up, ffn_down,
             };
 
-            eprintln!("Allocating GPU activation buffers (ctx={})...", ctx_len);
+            let n_slots  = n_slots.max(1);
+            let slot_ctx = (ctx_len / n_slots).max(1);
+            eprintln!("Allocating GPU activation buffers (ctx={} / {} slot(s) = {} each)...",
+                ctx_len, n_slots, slot_ctx);
             let hd      = cfg.head_dim();
             let kvd     = cfg.n_kv_heads * hd;
-            let kv_size = (ctx_len * kvd * 4) as u64;
+            let kv_size = (slot_ctx * kvd * 4) as u64;
 
-            let mut k_cache = Vec::with_capacity(cfg.n_layers);
-            let mut v_cache = Vec::with_capacity(cfg.n_layers);
-            for _ in 0..cfg.n_layers {
-                k_cache.push(g.alloc_act(kv_size)?);
-                v_cache.push(g.alloc_act(kv_size)?);
+            let mut k_cache = Vec::with_capacity(n_slots);
+            let mut v_cache = Vec::with_capacity(n_slots);
+            for _ in 0..n_slots {
+                let mut kl = Vec::with_capacity(cfg.n_layers);
+                let mut vl = Vec::with_capacity(cfg.n_layers);
+                for _ in 0..cfg.n_layers {
+                    kl.push(g.alloc_act(kv_size)?);
+                    vl.push(g.alloc_act(kv_size)?);
+                }
+                k_cache.push(kl);
+                v_cache.push(vl);
             }
 
-            let scores = g.alloc_act((cfg.n_heads * ctx_len) as u64 * 4)?;
+            let scores = g.alloc_act((cfg.n_heads * slot_ctx) as u64 * 4)?;
 
             let mut attn_norms = Vec::with_capacity(cfg.n_layers);
             let mut ffn_norms  = Vec::with_capacity(cfg.n_layers);
@@ -313,7 +327,7 @@ impl LlamaModel {
                 logits:   g.alloc_act(cfg.n_vocab as u64 * 4)?,
                 logits_rb:g.alloc_readback(cfg.n_vocab as u64 * 4)?,
                 k_cache, v_cache, scores,
-                ctx_len,
+                ctx_len: slot_ctx,
                 attn_norms, ffn_norms, out_norm,
                 q_bias: q_bias_bufs,
                 k_bias: k_bias_bufs,
