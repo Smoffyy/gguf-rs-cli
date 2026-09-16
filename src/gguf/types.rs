@@ -19,15 +19,12 @@ impl GgufValue {
             _ => None,
         }
     }
-    /// Read a value that may be stored as a scalar OR as an array of scalars.
-    /// Qwen2.5 stores eos_token_id as [151645, 151643] (two-element array).
     pub fn as_u32_list(&self) -> Vec<u32> {
         match self {
             Self::Array(arr) => arr.iter().filter_map(|v| v.as_u32()).collect(),
             other            => other.as_u32().into_iter().collect(),
         }
     }
-    // CRITICAL: Qwen2.5 stores rope_freq_base as F64 — must cast both
     pub fn as_f32(&self) -> Option<f32> {
         match self { Self::F32(v) => Some(*v), Self::F64(v) => Some(*v as f32), _ => None }
     }

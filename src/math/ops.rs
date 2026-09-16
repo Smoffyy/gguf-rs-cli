@@ -9,4 +9,5 @@ pub fn softmax(x:&mut[f32]){
     for v in x.iter_mut(){*v/=s;}
 }
 pub fn silu(x:f32)->f32{x/(1.0+(-x).exp())}
+pub fn gelu(x:f32)->f32{0.5*x*(1.0+(0.7978845608028654*(x+0.044715*x*x*x)).tanh())}
 pub fn add_into(a:&mut[f32],b:&[f32]){for(x,y)in a.iter_mut().zip(b.iter()){*x+=y;}}

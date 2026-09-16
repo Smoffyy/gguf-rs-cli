@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static SEED: AtomicU64 = AtomicU64::new(12345);
@@ -11,15 +12,36 @@ fn rand_f32() -> f32 {
     ((s >> 33) as f32) / (u32::MAX as f32)
 }
 
-/// Greedy decode — always picks the highest-probability token
+#[derive(Clone, Copy, Debug)]
+pub struct SampleParams {
+    pub temperature:       f32,
+    pub top_k:              usize,
+    pub top_p:               f32,
+    pub min_p:                f32,
+    pub rep_penalty:           f32,
+    pub presence_penalty:       f32,
+    pub frequency_penalty:       f32,
+    pub mirostat:                  u8,
+    pub mirostat_tau:                f32,
+    pub mirostat_eta:                 f32,
+}
+
+impl Default for SampleParams {
+    fn default() -> Self {
+        Self {
+            temperature: 0.7, top_k: 40, top_p: 0.9, min_p: 0.0, rep_penalty: 1.1,
+            presence_penalty: 0.0, frequency_penalty: 0.0,
+            mirostat: 0, mirostat_tau: 5.0, mirostat_eta: 0.1,
+        }
+    }
+}
+
 fn greedy(logits: &[f32]) -> usize {
     logits.iter().enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i).unwrap_or(0)
 }
 
-/// Apply repetition penalty to tokens seen recently.
-/// Divides positive logits and multiplies negative ones — penalty > 1.0 suppresses repeats.
 fn apply_rep_penalty(logits: &mut [f32], recent: &[u32], penalty: f32) {
     if penalty == 1.0 { return; }
     for &tok in recent {
@@ -29,56 +51,101 @@ fn apply_rep_penalty(logits: &mut [f32], recent: &[u32], penalty: f32) {
     }
 }
 
-/// Full sampler: temperature + top_k + top_p (nucleus) + repetition penalty.
-/// With the defaults (temp=0.7, top_k=40, top_p=0.9, rep=1.1) this produces
-/// clean output for most instruction-tuned models without any extra CLI flags.
-pub fn sample(logits: &mut Vec<f32>, temperature: f32, top_k: usize,
-              top_p: f32, rep_penalty: f32, recent: &[u32]) -> usize {
-    // Sanitise any NaN/Inf that the GPU may produce on edge cases
+fn apply_presence_freq_penalty(logits: &mut [f32], recent: &[u32], presence: f32, frequency: f32) {
+    if presence == 0.0 && frequency == 0.0 { return; }
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    for &t in recent { *counts.entry(t).or_insert(0) += 1; }
+    for (tok, count) in counts {
+        if let Some(l) = logits.get_mut(tok as usize) {
+            *l -= presence + frequency * count as f32;
+        }
+    }
+}
+
+fn softmax_sorted(logits: &[f32]) -> Vec<(usize, f32)> {
+    let mut pairs: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    pairs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    let max = pairs[0].1;
+    let mut sum = 0.0f32;
+    for p in pairs.iter_mut() { p.1 = (p.1 - max).exp(); sum += p.1; }
+    for p in pairs.iter_mut() { p.1 /= sum; }
+    pairs
+}
+
+fn sample_from(pairs: &[(usize, f32)]) -> usize {
+    let r = rand_f32();
+    let mut cum = 0.0f32;
+    for (idx, prob) in pairs {
+        cum += prob;
+        if r < cum { return *idx; }
+    }
+    pairs.last().map(|(i, _)| *i).unwrap_or(0)
+}
+
+fn sample_mirostat_v2(logits: &[f32], tau: f32, eta: f32, mu: &mut f32) -> usize {
+    let pairs = softmax_sorted(logits);
+    let mut cut = pairs.len();
+    for (i, (_, p)) in pairs.iter().enumerate() {
+        if -(p.max(1e-12).log2()) > *mu { cut = i.max(1); break; }
+    }
+    let mut candidates = pairs[..cut].to_vec();
+    let s: f32 = candidates.iter().map(|p| p.1).sum();
+    for p in candidates.iter_mut() { p.1 /= s; }
+    let chosen = sample_from(&candidates);
+    let chosen_p = pairs.iter().find(|(i, _)| *i == chosen).map(|(_, p)| *p).unwrap_or(1e-12);
+    let surprise = -(chosen_p.max(1e-12).log2());
+    *mu -= eta * (surprise - tau);
+    chosen
+}
+
+pub fn sample(logits: &mut Vec<f32>, params: &SampleParams, recent: &[u32], mirostat_mu: &mut f32) -> usize {
     for v in logits.iter_mut() {
         if !v.is_finite() { *v = -1e9; }
     }
 
-    apply_rep_penalty(logits, recent, rep_penalty);
+    apply_rep_penalty(logits, recent, params.rep_penalty);
+    apply_presence_freq_penalty(logits, recent, params.presence_penalty, params.frequency_penalty);
 
-    if temperature <= 0.0 { return greedy(logits); }
+    if params.temperature <= 0.0 { return greedy(logits); }
 
-    for v in logits.iter_mut() { *v /= temperature; }
+    for v in logits.iter_mut() { *v /= params.temperature; }
 
-    // Sort (index, scaled_logit) descending — total_cmp is NaN-safe and branchless
+    if params.mirostat == 1 || params.mirostat == 2 {
+        return sample_mirostat_v2(logits, params.mirostat_tau, params.mirostat_eta, mirostat_mu);
+    }
+
     let mut pairs: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
     pairs.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
 
-    // top_k: discard everything outside the top k candidates
-    if top_k > 0 && top_k < pairs.len() {
-        pairs.truncate(top_k);
+    if params.top_k > 0 && params.top_k < pairs.len() {
+        pairs.truncate(params.top_k);
     }
 
-    // Softmax over survivors
     let max = pairs[0].1;
     let mut sum = 0.0f32;
     for p in pairs.iter_mut() { p.1 = (p.1 - max).exp(); sum += p.1; }
     for p in pairs.iter_mut() { p.1 /= sum; }
 
-    // top_p (nucleus): keep the smallest prefix whose cumulative prob >= top_p
-    if top_p < 1.0 {
+    if params.min_p > 0.0 {
+        let top_prob = pairs[0].1;
+        let threshold = params.min_p * top_prob;
+        let cut = pairs.iter().position(|p| p.1 < threshold).unwrap_or(pairs.len()).max(1);
+        pairs.truncate(cut);
+        let s: f32 = pairs.iter().map(|p| p.1).sum();
+        for p in pairs.iter_mut() { p.1 /= s; }
+    }
+
+    if params.top_p < 1.0 {
         let mut cum = 0.0f32;
         let mut cut = pairs.len();
         for (i, p) in pairs.iter().enumerate() {
             cum += p.1;
-            if cum >= top_p { cut = i + 1; break; }
+            if cum >= params.top_p { cut = i + 1; break; }
         }
         pairs.truncate(cut);
         let s: f32 = pairs.iter().map(|p| p.1).sum();
         for p in pairs.iter_mut() { p.1 /= s; }
     }
 
-    // Multinomial sample
-    let r = rand_f32();
-    let mut cum = 0.0f32;
-    for (idx, prob) in &pairs {
-        cum += prob;
-        if r < cum { return *idx; }
-    }
-    pairs.last().map(|(i, _)| *i).unwrap_or(0)
+    sample_from(&pairs)
 }

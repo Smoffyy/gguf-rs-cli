@@ -3,12 +3,8 @@ layout(local_size_x=256) in;
 layout(set=0,binding=0) readonly buffer Mat { uint data[]; } mat;
 layout(set=0,binding=1) readonly buffer In  { float data[]; } vin;
 layout(set=0,binding=2) buffer Out { float data[]; } vout;
-layout(push_constant) uniform PC { uint rows; uint bpr;  uint row_start; } pc;
+layout(push_constant) uniform PC { uint rows; uint bpr; uint row_start; } pc;
 
-// Q4K block = 48 u32s per 256 weights:
-//   [0..7]   = 8 pre-scaled d values (f32)
-//   [8..15]  = 8 pre-scaled min values (f32)
-//   [16..47] = 32 nibble words (128 bytes = 256 nibbles)
 
 shared float sdata[256];
 
@@ -21,23 +17,24 @@ void main() {
 
     for (uint b = 0u; b < pc.bpr; b++) {
         uint blk = (row_base + b) * 48u;
-        uint vb = b * 256u;
-        // tid maps to weight index [0..255]
-        uint sub = tid >> 6u;       // sub-block [0..3]
-        uint p   = tid & 63u;       // position within sub-block
-        float sc, mn;
-        uint nib;
-        if (p < 32u) {
-            sc  = uintBitsToFloat(mat.data[blk + sub * 2u]);
-            mn  = uintBitsToFloat(mat.data[blk + 8u + sub * 2u]);
-            nib = (mat.data[blk + 16u + sub * 8u + (p >> 2u)] >> ((p & 3u) * 8u)) & 0xFu;
-        } else {
-            sc  = uintBitsToFloat(mat.data[blk + sub * 2u + 1u]);
-            mn  = uintBitsToFloat(mat.data[blk + 8u + sub * 2u + 1u]);
-            uint lp = p - 32u;
-            nib = (mat.data[blk + 16u + sub * 8u + (lp >> 2u)] >> ((lp & 3u) * 8u + 4u)) & 0xFu;
-        }
-        sum += (sc * float(nib) - mn) * vin.data[vb + tid];
+        uint vb  = b * 256u;
+        uint i   = tid;
+
+        uint p       = i / 64u;
+        uint within  = i % 64u;
+        bool isLow   = within < 32u;
+        uint l       = within % 32u;
+        uint j       = p * 2u + (isLow ? 0u : 1u);
+
+        float sc = uintBitsToFloat(mat.data[blk + j]);
+        float mn = uintBitsToFloat(mat.data[blk + 8u + j]);
+
+        uint k         = p * 32u + l;
+        uint qs_word   = mat.data[blk + 16u + k / 4u];
+        uint qs_byte   = (qs_word >> ((k % 4u) * 8u)) & 0xFFu;
+        uint nib = isLow ? (qs_byte & 0xFu) : (qs_byte >> 4u);
+
+        sum += (sc * float(nib) - mn) * vin.data[vb + i];
     }
 
     sdata[tid] = sum;

@@ -11,7 +11,6 @@ shared float sdata[256];
 void main() {
     uint tid = gl_LocalInvocationID.x;
 
-    // Phase 1: residual add (res += add_buf) and partial sum of squares
     float ss = 0.0;
     for (uint i = tid; i < pc.n; i += 256u) {
         float v = res[i] + add_buf[i];

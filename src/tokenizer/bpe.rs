@@ -12,14 +12,11 @@ pub struct Tokenizer {
     byte_enc:          [char; 256],
     byte_dec:          HashMap<char, u8>,
     pub special:       Vec<String>,
-    pub token_types:   Vec<u32>,    // 0=normal 1=unknown 2=control 3=user-defined
+    pub token_types:   Vec<u32>,
     pub tok_model:     TokModel,
     pub bos_id:        u32,
-    /// All EOS token IDs (Qwen2.5 has two: 151645 + 151643)
     pub eos_ids:       Vec<u32>,
-    /// Primary EOS for backward compat
     pub eos_id:        u32,
-    /// From GGUF tokenizer.ggml.add_bos_token — false for Qwen2/2.5
     pub add_bos_token: bool,
 }
 
@@ -40,13 +37,11 @@ impl Tokenizer {
         let bos_id = gguf.metadata.get("tokenizer.ggml.bos_token_id")
             .and_then(|v| v.as_u32()).unwrap_or(1);
 
-        // Read eos_token_id as a list (Qwen2.5 stores [151645, 151643])
         let eos_ids: Vec<u32> = gguf.metadata.get("tokenizer.ggml.eos_token_id")
             .map(|v| v.as_u32_list())
             .unwrap_or_else(|| vec![2]);
         let eos_id = eos_ids.first().copied().unwrap_or(2);
 
-        // CRITICAL: Qwen2.5 sets add_bos_token=false — do NOT prepend BOS
         let add_bos_token = gguf.metadata.get("tokenizer.ggml.add_bos_token")
             .and_then(|v| v.as_bool()).unwrap_or(true);
 
@@ -75,7 +70,6 @@ impl Tokenizer {
             .map(|a| a.iter().map(|v| v.as_u32().unwrap_or(0)).collect())
             .unwrap_or_default();
 
-        // Special tokens: control (type 2), user-defined (type 3), or <|...|> / [...] patterns
         let mut special: Vec<String> = vocab.iter().enumerate()
             .filter(|(i, s)| {
                 let t = token_types.get(*i).copied().unwrap_or(0);
@@ -91,7 +85,6 @@ impl Tokenizer {
                   special, token_types, tok_model, bos_id, eos_ids, eos_id, add_bos_token })
     }
 
-    /// Encode text. Respects the model's own add_bos_token GGUF flag.
     pub fn encode(&self, text: &str, add_bos: bool) -> Vec<u32> {
         let prepend = add_bos && self.add_bos_token;
         let mut ids = if prepend { vec![self.bos_id] } else { vec![] };
@@ -179,7 +172,6 @@ impl Tokenizer {
 
     pub fn decode(&self, id: u32) -> String {
         if id as usize >= self.vocab.len() { return String::new(); }
-        // Skip control/special tokens silently — don't print <|im_start|> etc.
         let typ = self.token_types.get(id as usize).copied().unwrap_or(0);
         if typ == 2 || typ == 3 { return String::new(); }
         let s = &self.vocab[id as usize];

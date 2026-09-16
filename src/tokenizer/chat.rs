@@ -4,8 +4,6 @@ use crate::tokenizer::bpe::Tokenizer;
 pub enum ChatTemplate { ChatML, Llama3, Llama2, Gemma, Phi3, Simple }
 
 impl ChatTemplate {
-    /// Detect template type from the model's Jinja template string (from GGUF metadata),
-    /// falling back to scanning the vocabulary for known special tokens.
     pub fn detect(tok: &Tokenizer, chat_template: Option<&str>) -> Self {
         if let Some(tmpl) = chat_template {
             if tmpl.contains("<|im_start|>")        { return Self::ChatML; }
@@ -22,12 +20,10 @@ impl ChatTemplate {
         Self::Simple
     }
 
-    /// Whether this template prepends a BOS token before the first message.
     pub fn uses_bos(&self) -> bool {
         matches!(self, Self::Llama2 | Self::Simple)
     }
 
-    /// Format the system prompt block for this template.
     pub fn system_prompt(&self, sys: &str) -> String {
         match self {
             Self::ChatML  => format!("<|im_start|>system\n{}<|im_end|>\n", sys),
@@ -39,7 +35,6 @@ impl ChatTemplate {
         }
     }
 
-    /// Format a user message turn with the assistant generation prompt appended.
     pub fn user_turn(&self, msg: &str) -> String {
         match self {
             Self::ChatML  => format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", msg),
@@ -53,7 +48,6 @@ impl ChatTemplate {
         }
     }
 
-    /// Build the stop token list from the model's EOS ids plus template-specific end markers.
     pub fn stop_tokens(&self, tok: &Tokenizer) -> Vec<u32> {
         let mut stops = tok.eos_ids.clone();
         let extras: &[&str] = match self {

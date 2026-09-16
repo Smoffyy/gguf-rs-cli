@@ -5,7 +5,6 @@ layout(set=0,binding=1) readonly buffer In  { float data[]; } vin;
 layout(set=0,binding=2) buffer Out { float data[]; } vout;
 layout(push_constant) uniform PC { uint rows; uint bpr;  uint row_start; } pc;
 
-// Q4_0 block = 5 u32s per 32 weights: [f16_scale_bits, nibble_u32 x4]
 
 shared float sdata[256];
 
