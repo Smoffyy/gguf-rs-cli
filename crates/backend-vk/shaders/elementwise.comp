@@ -1,0 +1,49 @@
+#version 450
+// The cheap per-element ops, selected by push constant. These are bandwidth-bound, so a
+// branch costs nothing and one pipeline is easier to keep correct than six.
+//
+// op: 0 add, 1 mul, 2 sub, 3 glu, 4 activate, 5 scale, 6 softcap, 7 fill
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer Dst          { float dst[]; };
+layout(set = 0, binding = 1) readonly buffer A   { float a[]; };
+layout(set = 0, binding = 2) readonly buffer B   { float b[]; };
+
+layout(push_constant) uniform PC {
+    uint n;
+    uint bn;
+    uint op;
+    uint act;
+    float limit;
+    float alpha;
+    float value;
+} pc;
+
+float act_apply(uint act, float x, float alpha) {
+    if (act == 0u) return x / (1.0 + exp(-x));
+    if (act == 1u || act == 2u) return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
+    if (act == 3u) return x / (1.0 + exp(-1.702 * x));
+    if (act == 4u) return max(x, 0.0);
+    if (act == 5u) { float r = max(x, 0.0); return r * r; }
+    return x / (1.0 + exp(-alpha * x));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    switch (pc.op) {
+        case 0u: dst[i] = a[i] + b[i % pc.bn]; break;
+        case 1u: dst[i] = a[i] * b[i % pc.bn]; break;
+        case 2u: dst[i] = a[i] - b[i % pc.bn]; break;
+        case 3u: {
+            float g = a[i], u = b[i];
+            if (pc.limit > 0.0) { g = clamp(g, -pc.limit, pc.limit); u = clamp(u, -pc.limit, pc.limit); }
+            dst[i] = act_apply(pc.act, g, pc.alpha) * u;
+            break;
+        }
+        case 4u: dst[i] = act_apply(pc.act, dst[i], pc.alpha); break;
+        case 5u: dst[i] *= pc.value; break;
+        case 6u: dst[i] = pc.value * tanh(dst[i] / pc.value); break;
+        default: dst[i] = pc.value; break;
+    }
+}

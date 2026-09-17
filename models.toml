@@ -1,0 +1,18 @@
+# gguf-rs server registry.
+#
+# [defaults] applies to every model; a [models.<name>] section overrides it. The section
+# name is what clients send as "model" in an API request.
+
+[defaults]
+device   = "auto"      # auto, cpu, cuda[:N], vulkan[:N]
+kv_type  = "f16"       # f16 halves the KV cache; f32 for bit-comparable output
+ctx      = 4096
+parallel = 2           # concurrent sequences per loaded model
+
+[models.qwen]
+path    = "model/path"
+preload = true
+temperature = 0.7
+
+[models.gemma]
+path = "model/path"

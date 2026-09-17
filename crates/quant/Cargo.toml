@@ -1,0 +1,14 @@
+[package]
+name    = "gguf-quant"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "ggml block quantization formats: decoding, activation quantization, integer dot products"
+
+[dependencies]
+gguf-core = { workspace = true }
+half      = { workspace = true }
+
+[dev-dependencies]
+half = { workspace = true }

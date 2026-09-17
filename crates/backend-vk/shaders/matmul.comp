@@ -1,0 +1,73 @@
+#version 450
+// dst = weight @ src, with the weight decoded from its GGUF block layout in registers.
+//
+// Unlike the CUDA path this keeps the activation in f32 rather than staging it to Q8_1.
+// A GEMV against quantized weights is bound by weight bandwidth, not by the arithmetic on
+// the activation, and an integer dot product on Vulkan needs an extension that the older
+// drivers this backend exists to reach do not have. Decoding into registers costs ALU that
+// is otherwise idle.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer W   { uint  WEIGHTS[]; };
+layout(set = 0, binding = 1) readonly buffer Src { float src[]; };
+layout(set = 0, binding = 2) writeonly buffer Dst { float dst[]; };
+layout(set = 0, binding = 3) readonly buffer Bias { float bias[]; };
+
+layout(push_constant) uniform PC {
+    uint n_in;
+    uint n_out;
+    uint n_tokens;
+    uint row_bytes;
+    uint has_bias;
+} pc;
+
+#include "common.glsl"
+
+// Four tokens per pass: enough that a decoded weight chunk is reused, few enough that the
+// accumulators stay in registers.
+#define TILE 4
+
+shared float red[64][TILE];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= pc.n_out) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint chunks = pc.n_in / 32u;
+    uint row_base = row * pc.row_bytes;
+    float b = pc.has_bias != 0u ? bias[row] : 0.0;
+
+    for (uint t0 = 0u; t0 < pc.n_tokens; t0 += uint(TILE)) {
+        float acc[TILE];
+        for (int k = 0; k < TILE; ++k) acc[k] = 0.0;
+
+        for (uint c = tid; c < chunks; c += 64u) {
+            float w[32];
+            dequant32(row_base, c, w);
+            for (int k = 0; k < TILE; ++k) {
+                uint t = t0 + uint(k);
+                if (t >= pc.n_tokens) break;
+                uint sbase = t * pc.n_in + c * 32u;
+                float s = 0.0;
+                for (int j = 0; j < 32; ++j) s += w[j] * src[sbase + uint(j)];
+                acc[k] += s;
+            }
+        }
+
+        for (int k = 0; k < TILE; ++k) red[tid][k] = acc[k];
+        barrier();
+        for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) {
+                for (int k = 0; k < TILE; ++k) red[tid][k] += red[tid + stride][k];
+            }
+            barrier();
+        }
+        if (tid == 0u) {
+            for (int k = 0; k < TILE; ++k) {
+                uint t = t0 + uint(k);
+                if (t < pc.n_tokens) dst[t * pc.n_out + row] = red[0][k] + b;
+            }
+        }
+        barrier();
+    }
+}

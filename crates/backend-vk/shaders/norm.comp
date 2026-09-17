@@ -1,0 +1,59 @@
+#version 450
+// RMSNorm (kind 0) or LayerNorm (kind 1), one workgroup per row.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer Src  { float src[]; };
+layout(set = 0, binding = 1) buffer Dst           { float dst[]; };
+layout(set = 0, binding = 2) readonly buffer Wgt  { float weight[]; };
+layout(set = 0, binding = 3) readonly buffer Bias { float bias[]; };
+
+layout(push_constant) uniform PC {
+    uint dim;
+    uint kind;
+    float eps;
+    float scale;
+    uint has_weight;
+    uint has_bias;
+} pc;
+
+shared float red[256];
+
+float reduce_sum(float v) {
+    uint tid = gl_LocalInvocationID.x;
+    red[tid] = v;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) red[tid] += red[tid + s];
+        barrier();
+    }
+    return red[0];
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * pc.dim;
+
+    float mean = 0.0;
+    if (pc.kind == 1u) {
+        float s = 0.0;
+        for (uint i = tid; i < pc.dim; i += 256u) s += src[base + i];
+        mean = reduce_sum(s) / float(pc.dim);
+        barrier();
+    }
+
+    float sq = 0.0;
+    for (uint i = tid; i < pc.dim; i += 256u) {
+        float v = src[base + i] - mean;
+        sq += v * v;
+    }
+    float inv = inversesqrt(reduce_sum(sq) / float(pc.dim) + pc.eps);
+    barrier();
+
+    for (uint i = tid; i < pc.dim; i += 256u) {
+        float v = (src[base + i] - mean) * inv;
+        if (pc.has_weight != 0u) v *= weight[i];
+        if (pc.has_bias != 0u) v += bias[i];
+        dst[base + i] = v * pc.scale;
+    }
+}

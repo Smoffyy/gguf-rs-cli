@@ -4,6 +4,76 @@ All notable changes will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-09-16
+### Added
+KV cache stores f16 by default, halving the largest allocation after the weights. Qwen3-8B
+at 8192 context drops from 7.5 GiB to 6.3 GiB resident. `--kv-type f32` restores the old
+storage. `gguf-rs run` now prints the weights/KV/total breakdown.
+
+`--no-think`, and `enable_thinking` in the server registry.
+
+### Fixed
+Chat templates using an extended slice (`messages[::-1]`, which Qwen3 uses to find the last
+user turn) were rejected, silently falling back to built-in ChatML. The Jinja parser now
+handles a slice step, including negative ones.
+
+`enable_thinking` was pinned to false, which made Qwen3's template emit an empty
+`<think></think>` pair and suppressed reasoning. It is now left undefined so the model's own
+default applies.
+
+## [3.0.0] - 2026-09-16
+### Changed
+Complete rewrite. The single crate is now a workspace of twelve, split around one
+`Backend` trait: everything above it is device-agnostic, everything below it is a device.
+The trait uses explicit methods, so adding a backend fails to compile until every op exists
+rather than silently falling back.
+
+### Added
+Native CUDA backend. Kernels are CUDA C compiled to PTX at build time and driven through
+the driver API loaded at run time, so there is no link-time CUDA dependency and one build
+covers Windows and Linux on any GPU from Turing onward. NVIDIA's own Rust CUDA tracks
+(cuda-oxide, cutile) are Linux-only and could not be used.
+
+Vulkan backend rewritten against native GGUF block layouts, Vulkan 1.0 with no optional
+extensions, one shader per kernel with the quantization as a specialization constant.
+
+Architecture inference replaces the hardcoded graph: `ArchSpec::infer` reads which tensors a
+block contains and which metadata keys are set, so unseen architectures run. Detects MoE and
+shared experts, QK-norm, post-norms, sliding windows and their per-layer pattern, attention
+sinks, fused QKV and gate/up, partial rotary, tied embeddings, softcapping,
+parallel-residual and post-norm blocks, YaRN and Llama-3 scaling, M-RoPE sections.
+
+Jinja subset interpreter for `tokenizer.chat_template`, so chat formatting comes from the
+model rather than a maintained table of six formats.
+
+Quantization coverage: BF16, IQ4_NL, IQ4_XS, MXFP4, TQ1_0, TQ2_0 alongside the existing set.
+The codebook-grid types (IQ1/IQ2/IQ3) are refused with a clear message instead of guessed at,
+as are state-space hybrids and MLA.
+
+`gguf-rs inspect`, `check`, `bench` and `devices`; TOML model registry replacing models.ini;
+op-level cross-backend conformance tests.
+
+### Fixed
+RoPE only implemented the NeoX split-half layout, which is wrong for LLaMA, Mistral and the
+rest of that family — they need the NORM adjacent-pair layout. Both are now implemented and
+selected per architecture.
+
+Gemma produced noise: the engine applied `x * (1 + w)` to norm weights, but the GGUF
+converter already bakes that `+1` in, so it was counted twice.
+
+MoE layers no longer drop to the CPU mid-forward; routing, expert matmuls and reduction all
+run on the device.
+
+Matmul parallelised over tokens, which left every core but one idle during decode. Now over
+output rows: 6.5x on CPU.
+
+Attention launched one block per head, so a decode step used a fraction of the GPU while
+each block walked the history serially. Split-K flash decoding: 3x.
+
+### Performance
+RTX 3080, Qwen3-1.7B Q4_K_M, 512-token prompt. Prefill/decode tok/s: CPU 30/15,
+Vulkan 85/43, CUDA 562/138.
+
 ## [2.1.0] - 2026-09-15
 ### Added
 `gguf-rs-server`: an OpenAI-compatible local HTTP server (`GET /v1/models`, `POST

@@ -1,0 +1,25 @@
+[package]
+name    = "gguf-runtime"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "Device selection, KV cache and the generation loop for the gguf-rs inference engine"
+
+[features]
+default = []
+cuda    = ["dep:gguf-backend-cuda"]
+vulkan  = ["dep:gguf-backend-vk"]
+
+[dependencies]
+gguf-core        = { workspace = true }
+gguf-format      = { workspace = true }
+gguf-model       = { workspace = true }
+gguf-tokenizer   = { workspace = true }
+gguf-sample      = { workspace = true }
+gguf-backend-cpu = { workspace = true }
+gguf-backend-cuda = { workspace = true, optional = true }
+gguf-backend-vk   = { workspace = true, optional = true }
+
+[dev-dependencies]
+half = { workspace = true }

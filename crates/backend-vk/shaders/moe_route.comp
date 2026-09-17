@@ -1,0 +1,62 @@
+#version 450
+// Softmax or sigmoid over the router logits, then top-k selection, one thread per token.
+//
+// Selection is sequential on purpose: a parallel top-k resolves near-ties by whichever
+// thread wins the race, and which expert fires changes the output.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer Logits { float logits[]; };
+layout(set = 0, binding = 1) readonly buffer PB     { float probs_bias[]; };
+layout(set = 0, binding = 2) buffer SelI            { int sel_idx[]; };
+layout(set = 0, binding = 3) buffer SelW            { float sel_w[]; };
+
+layout(push_constant) uniform PC {
+    uint n_expert;
+    uint n_used;
+    uint n_tokens;
+    uint gate_func;
+    uint norm_topk;
+    uint has_bias;
+    float scale;
+} pc;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= pc.n_tokens) return;
+    uint lb = t * pc.n_expert;
+
+    float maxl = -1e30;
+    float sum = 0.0;
+    if (pc.gate_func == 0u) {
+        for (uint e = 0u; e < pc.n_expert; ++e) maxl = max(maxl, logits[lb + e]);
+        for (uint e = 0u; e < pc.n_expert; ++e) sum += exp(logits[lb + e] - maxl);
+    }
+
+    float wsum = 0.0;
+    for (uint k = 0u; k < pc.n_used; ++k) {
+        int best = -1;
+        float best_key = -1e30;
+        for (uint e = 0u; e < pc.n_expert; ++e) {
+            bool taken = false;
+            for (uint j = 0u; j < k; ++j) {
+                if (sel_idx[t * pc.n_used + j] == int(e)) { taken = true; break; }
+            }
+            if (taken) continue;
+            // The bias steers selection only; the applied weight stays unbiased.
+            float key = logits[lb + e] + (pc.has_bias != 0u ? probs_bias[e] : 0.0);
+            if (key > best_key) { best_key = key; best = int(e); }
+        }
+        if (best < 0) best = 0;
+        float prob = pc.gate_func == 0u
+            ? exp(logits[lb + uint(best)] - maxl) / max(sum, 1e-20)
+            : 1.0 / (1.0 + exp(-logits[lb + uint(best)]));
+        sel_idx[t * pc.n_used + k] = best;
+        sel_w[t * pc.n_used + k] = prob;
+        wsum += prob;
+    }
+    for (uint k = 0u; k < pc.n_used; ++k) {
+        float w = sel_w[t * pc.n_used + k];
+        if (pc.norm_topk != 0u) w /= max(wsum, 1e-20);
+        sel_w[t * pc.n_used + k] = w * pc.scale;
+    }
+}

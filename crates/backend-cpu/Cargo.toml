@@ -1,0 +1,14 @@
+[package]
+name    = "gguf-backend-cpu"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "CPU backend for the gguf-rs inference engine"
+
+[dependencies]
+gguf-core  = { workspace = true }
+gguf-quant = { workspace = true }
+rayon      = { workspace = true }
+bytemuck   = { workspace = true }
+half       = { workspace = true }

@@ -1,0 +1,55 @@
+#version 450
+// Flash decoding, combine pass: merge the per-split partials into the final output.
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) readonly buffer Partial { float partial[]; };
+layout(set = 0, binding = 1) writeonly buffer Dst    { float dst[]; };
+layout(set = 0, binding = 2) readonly buffer Sinks   { float sinks[]; };
+
+layout(push_constant) uniform PC {
+    uint n_heads;
+    uint head_dim;
+    uint n_tokens;
+    uint n_splits;
+    uint has_sinks;
+} pc;
+
+void main() {
+    uint hb = gl_WorkGroupID.x;
+    uint h = hb % pc.n_heads;
+    uint t = hb / pc.n_heads;
+    if (t >= pc.n_tokens) return;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint stride = pc.head_dim + 2u;
+    uint base = hb * pc.n_splits * stride;
+
+    float gm = -1e30;
+    for (uint s = 0u; s < pc.n_splits; ++s) gm = max(gm, partial[base + s * stride + pc.head_dim]);
+    // A split that covered no keys has m = -1e30 and l = 0, so it drops out of both sums.
+    float gl = 0.0;
+    for (uint s = 0u; s < pc.n_splits; ++s) {
+        uint p = base + s * stride;
+        gl += partial[p + pc.head_dim + 1u] * exp(partial[p + pc.head_dim] - gm);
+    }
+
+    // A learned sink is an extra logit with no value vector: it moves probability mass out
+    // of the softmax without contributing to the output.
+    if (pc.has_sinks != 0u) {
+        float sink = sinks[h];
+        float new_m = max(gm, sink);
+        gl = gl * exp(gm - new_m) + exp(sink - new_m);
+        gm = new_m;
+    }
+
+    float inv = 1.0 / max(gl, 1e-20);
+    uint obase = (t * pc.n_heads + h) * pc.head_dim;
+    for (uint i = tid; i < pc.head_dim; i += 128u) {
+        float acc = 0.0;
+        for (uint s = 0u; s < pc.n_splits; ++s) {
+            uint p = base + s * stride;
+            acc += partial[p + i] * exp(partial[p + pc.head_dim] - gm);
+        }
+        dst[obase + i] = acc * inv;
+    }
+}

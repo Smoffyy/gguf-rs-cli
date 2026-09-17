@@ -1,0 +1,30 @@
+#version 450
+// dst[t] = weight[tokens[t]] * scale
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer W   { uint  WEIGHTS[]; };
+layout(set = 0, binding = 1) readonly buffer Idx { int   tokens[]; };
+layout(set = 0, binding = 2) writeonly buffer Dst { float dst[]; };
+
+layout(push_constant) uniform PC {
+    uint n_rows;
+    uint cols;
+    uint row_bytes;
+    float scale;
+    uint n_tokens;
+} pc;
+
+#include "common.glsl"
+
+void main() {
+    uint t = gl_WorkGroupID.x;
+    if (t >= pc.n_tokens) return;
+    int r = clamp(tokens[t], 0, int(pc.n_rows) - 1);
+    uint row_base = uint(r) * pc.row_bytes;
+    uint chunks = pc.cols / 32u;
+    for (uint c = gl_LocalInvocationID.x; c < chunks; c += 64u) {
+        float w[32];
+        dequant32(row_base, c, w);
+        for (int j = 0; j < 32; ++j) dst[t * pc.cols + c * 32u + uint(j)] = w[j] * pc.scale;
+    }
+}

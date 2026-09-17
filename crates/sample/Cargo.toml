@@ -1,0 +1,9 @@
+[package]
+name    = "gguf-sample"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "Logit processing and token sampling"
+
+[dependencies]

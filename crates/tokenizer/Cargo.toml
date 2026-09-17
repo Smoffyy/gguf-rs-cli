@@ -1,0 +1,11 @@
+[package]
+name    = "gguf-tokenizer"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "Tokenization and chat templating driven by GGUF metadata"
+
+[dependencies]
+gguf-core   = { workspace = true }
+gguf-format = { workspace = true }

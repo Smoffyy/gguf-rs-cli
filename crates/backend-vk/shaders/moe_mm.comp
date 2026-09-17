@@ -1,0 +1,48 @@
+#version 450
+// One expert matmul slot per workgroup row: gl_WorkGroupID.y indexes (token * n_used + k).
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) readonly buffer W    { uint WEIGHTS[]; };
+layout(set = 0, binding = 1) readonly buffer Src  { float src[]; };
+layout(set = 0, binding = 2) writeonly buffer Dst { float dst[]; };
+layout(set = 0, binding = 3) readonly buffer SelI { int sel_idx[]; };
+
+layout(push_constant) uniform PC {
+    uint n_in;
+    uint n_out;
+    uint n_used;
+    uint n_tokens;
+    uint row_bytes;
+    uint expert_stride;
+} pc;
+
+#include "common.glsl"
+
+shared float red[64];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint slot = gl_WorkGroupID.y;
+    if (row >= pc.n_out || slot >= pc.n_used * pc.n_tokens) return;
+    uint tid = gl_LocalInvocationID.x;
+
+    uint e = uint(sel_idx[slot]);
+    uint row_base = e * pc.expert_stride + row * pc.row_bytes;
+    uint sbase = slot * pc.n_in;
+    uint chunks = pc.n_in / 32u;
+
+    float acc = 0.0;
+    for (uint c = tid; c < chunks; c += 64u) {
+        float w[32];
+        dequant32(row_base, c, w);
+        for (int j = 0; j < 32; ++j) acc += w[j] * src[sbase + c * 32u + uint(j)];
+    }
+
+    red[tid] = acc;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (tid < s) red[tid] += red[tid + s];
+        barrier();
+    }
+    if (tid == 0u) dst[slot * pc.n_out + row] = red[0];
+}

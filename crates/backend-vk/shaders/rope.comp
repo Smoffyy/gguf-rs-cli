@@ -1,0 +1,59 @@
+#version 450
+// Rotary position embedding. `kind` 0 rotates adjacent pairs, 1 rotates split halves.
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) buffer X             { float x[]; };
+layout(set = 0, binding = 1) readonly buffer Pos  { int pos[]; };
+layout(set = 0, binding = 2) readonly buffer FF   { float freq_factors[]; };
+
+layout(push_constant) uniform PC {
+    uint n_heads;
+    uint head_dim;
+    uint n_rot;
+    uint n_tokens;
+    uint kind;
+    uint has_ff;
+    float freq_base;
+    float freq_scale;
+    float ext_factor;
+    float attn_factor;
+    float corr_lo;
+    float corr_hi;
+} pc;
+
+float yarn_ramp(float low, float high, uint i) {
+    float y = (float(i) - low) / max(0.001, high - low);
+    return 1.0 - clamp(y, 0.0, 1.0);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint pairs = pc.n_rot / 2u;
+    if (idx >= pc.n_tokens * pc.n_heads * pairs) return;
+
+    uint i = idx % pairs;
+    uint h = (idx / pairs) % pc.n_heads;
+    uint t = idx / (pairs * pc.n_heads);
+
+    float ff = pc.has_ff != 0u ? freq_factors[i] : 1.0;
+    // One power rather than raising a precomputed step, matching the other backends.
+    float theta_extrap = float(pos[t]) * pow(pc.freq_base, -2.0 * float(i) / float(pc.n_rot)) / ff;
+    float theta_interp = pc.freq_scale * theta_extrap;
+
+    float theta = theta_interp;
+    float mscale = pc.attn_factor;
+    if (pc.ext_factor != 0.0) {
+        float mix_f = yarn_ramp(pc.corr_lo, pc.corr_hi, i) * pc.ext_factor;
+        theta = theta_interp * (1.0 - mix_f) + theta_extrap * mix_f;
+        mscale *= 1.0 + 0.1 * log(1.0 / pc.freq_scale);
+    }
+    float sn = sin(theta) * mscale;
+    float cs = cos(theta) * mscale;
+
+    uint base = (t * pc.n_heads + h) * pc.head_dim;
+    uint a = pc.kind == 0u ? (i * 2u) : i;
+    uint b = pc.kind == 0u ? (i * 2u + 1u) : (i + pc.n_rot / 2u);
+    float x0 = x[base + a], x1 = x[base + b];
+    x[base + a] = x0 * cs - x1 * sn;
+    x[base + b] = x0 * sn + x1 * cs;
+}

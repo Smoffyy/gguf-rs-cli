@@ -1,0 +1,28 @@
+[package]
+name    = "gguf-rs-cli"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "Command line for the gguf-rs inference engine"
+
+[[bin]]
+name = "gguf-rs"
+path = "src/main.rs"
+
+[features]
+default = ["cuda", "vulkan"]
+cuda    = ["gguf-runtime/cuda", "gguf-server/cuda"]
+vulkan  = ["gguf-runtime/vulkan", "gguf-server/vulkan"]
+
+[dependencies]
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+gguf-core      = { workspace = true }
+gguf-format    = { workspace = true }
+gguf-model     = { workspace = true }
+gguf-quant     = { workspace = true }
+gguf-runtime   = { workspace = true }
+gguf-sample    = { workspace = true }
+gguf-server    = { workspace = true }
+gguf-tokenizer = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name    = "gguf-backend-vk"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+rust-version.workspace = true
+description = "Vulkan backend: SPIR-V compute shaders, portable across AMD, Intel and NVIDIA"
+build       = "build.rs"
+
+[dependencies]
+gguf-core = { workspace = true }
+ash       = { workspace = true }
+
+[build-dependencies]
+shaderc = "0.10"

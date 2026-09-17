@@ -1,0 +1,143 @@
+#version 450
+// Flash decoding, split pass: each workgroup reduces one slice of the key/value range with
+// an online softmax and writes a partial result.
+//
+// The obvious shape - one workgroup per (token, head) walking the whole history - launches
+// only n_heads workgroups during decode and leaves most of the GPU idle while each one
+// walks thousands of keys serially. Splitting the sequence is what keeps attention from
+// dominating a decode step on long contexts.
+//
+// Each subgroup-sized group of 32 invocations owns a strided subset of the keys and keeps
+// its own running maximum, denominator and weighted value sum. Vulkan 1.0 has no portable
+// subgroup operations, so the per-key reduction uses shared memory over 32 invocations
+// rather than shuffles - still far cheaper than a whole-workgroup barrier per key.
+layout(local_size_x = 128) in;
+
+layout(set = 0, binding = 0) readonly buffer Q    { float q[]; };
+// Declared as uint so one buffer declaration serves both storage formats: f32 is read back
+// with uintBitsToFloat, f16 packs two values per word. Vulkan 1.0 has no 16-bit storage
+// type without an extension this backend deliberately does not require.
+layout(set = 0, binding = 1) readonly buffer KC   { uint k_cache[]; };
+layout(set = 0, binding = 2) readonly buffer VC   { uint v_cache[]; };
+layout(set = 0, binding = 3) buffer Partial       { float partial[]; };
+
+layout(push_constant) uniform PC {
+    uint n_heads;
+    uint n_kv_heads;
+    uint head_dim;
+    uint n_tokens;
+    uint kv_len;
+    uint start_pos;
+    uint stride;
+    uint base;
+    float scale;
+    float softcap;
+    uint window;
+    uint n_splits;
+} pc;
+
+// 0 = f32 storage, 1 = f16.
+layout(constant_id = 0) const int KV_TYPE = 0;
+
+float kv_k(uint i) {
+    return KV_TYPE == 0 ? uintBitsToFloat(k_cache[i])
+                        : unpackHalf2x16(k_cache[i >> 1u])[i & 1u];
+}
+
+float kv_v(uint i) {
+    return KV_TYPE == 0 ? uintBitsToFloat(v_cache[i])
+                        : unpackHalf2x16(v_cache[i >> 1u])[i & 1u];
+}
+
+#define GROUPS 4
+#define GROUP_SIZE 32
+#define MAX_HEAD_DIM 256
+
+shared float sq[MAX_HEAD_DIM];
+shared float sacc[GROUPS][MAX_HEAD_DIM];
+shared float sred[GROUPS][GROUP_SIZE];
+shared float sm[GROUPS];
+shared float sl[GROUPS];
+
+void main() {
+    uint hb = gl_WorkGroupID.x;
+    uint split = gl_WorkGroupID.y;
+    uint h = hb % pc.n_heads;
+    uint t = hb / pc.n_heads;
+    if (t >= pc.n_tokens) return;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint grp = tid / GROUP_SIZE;
+    uint lane = tid % GROUP_SIZE;
+    uint gqa = pc.n_heads / pc.n_kv_heads;
+    uint kv_h = h / gqa;
+
+    uint qbase = (t * pc.n_heads + h) * pc.head_dim;
+    for (uint i = tid; i < pc.head_dim; i += 128u) sq[i] = q[qbase + i];
+    for (uint i = lane; i < pc.head_dim; i += GROUP_SIZE) sacc[grp][i] = 0.0;
+    barrier();
+
+    uint q_pos = pc.start_pos + t;
+    uint hi = min(q_pos + 1u, pc.kv_len);
+    uint lo = pc.window > 0u ? uint(max(0, int(q_pos) + 1 - int(pc.window))) : 0u;
+
+    // Contiguous slices, so each workgroup's key reads stay local.
+    uint span = (hi - lo + pc.n_splits - 1u) / pc.n_splits;
+    uint my_lo = lo + split * span;
+    uint my_hi = min(hi, my_lo + span);
+
+    float m = -1e30;
+    float l = 0.0;
+
+    for (uint p = my_lo + grp; p < my_hi; p += uint(GROUPS)) {
+        uint off = (pc.base + p) * pc.stride + kv_h * pc.head_dim;
+        float acc = 0.0;
+        for (uint i = lane; i < pc.head_dim; i += GROUP_SIZE) acc += sq[i] * kv_k(off + i);
+        sred[grp][lane] = acc;
+        memoryBarrierShared();
+        barrier();
+        // A tree reduction over this group's 32 invocations only.
+        for (uint s = GROUP_SIZE / 2u; s > 0u; s >>= 1u) {
+            if (lane < s) sred[grp][lane] += sred[grp][lane + s];
+            memoryBarrierShared();
+            barrier();
+        }
+        float sc = sred[grp][0] * pc.scale;
+        if (pc.softcap > 0.0) sc = pc.softcap * tanh(sc / pc.softcap);
+
+        float new_m = max(m, sc);
+        float alpha = exp(m - new_m);
+        float p_s = exp(sc - new_m);
+        for (uint i = lane; i < pc.head_dim; i += GROUP_SIZE) {
+            sacc[grp][i] = sacc[grp][i] * alpha + p_s * kv_v(off + i);
+        }
+        l = l * alpha + p_s;
+        m = new_m;
+        barrier();
+    }
+
+    if (lane == 0u) {
+        sm[grp] = m;
+        sl[grp] = l;
+    }
+    barrier();
+
+    // Combine the groups' partials the same way the second pass combines workgroups.
+    if (grp == 0u) {
+        float gm = -1e30;
+        for (int w = 0; w < GROUPS; ++w) gm = max(gm, sm[w]);
+        float gl = 0.0;
+        for (int w = 0; w < GROUPS; ++w) gl += sl[w] * exp(sm[w] - gm);
+
+        uint out_base = (hb * pc.n_splits + split) * (pc.head_dim + 2u);
+        for (uint i = lane; i < pc.head_dim; i += GROUP_SIZE) {
+            float acc = 0.0;
+            for (int w = 0; w < GROUPS; ++w) acc += sacc[w][i] * exp(sm[w] - gm);
+            partial[out_base + i] = acc;
+        }
+        if (lane == 0u) {
+            partial[out_base + pc.head_dim] = gm;
+            partial[out_base + pc.head_dim + 1u] = gl;
+        }
+    }
+}
